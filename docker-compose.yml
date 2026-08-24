@@ -1,0 +1,67 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  api:
+    build: .
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/data/workspace
+    depends_on:
+      - redis
+
+  worker:
+    build: .
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=2
+    env_file:
+      - .env
+    volumes:
+      - ./data:/data/workspace
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - redis
+
+  terrain-server:
+    build:
+      context: ../cesium-terrain-server/docker
+      dockerfile: Dockerfile
+    image: geodata/cesium-terrain-server:local
+    ports:
+      - "8081:8000"
+    environment:
+      SERVE_STATIC: "0"
+      BASE_TERRAIN_PATH: "/tilesets"
+      LOG_LEVEL: notice
+    volumes:
+      # Full data mount so tileset symlinks (../../jobs/...) resolve inside the container.
+      - ./data:/data
+    restart: unless-stopped
+
+  # Cesium static preview UI (same image / tiles data as terrain-server).
+  # Open http://localhost:8080/?tileset={name}
+  terrain-preview:
+    build:
+      context: ../cesium-terrain-server/docker
+      dockerfile: Dockerfile
+    image: geodata/cesium-terrain-server:local
+    ports:
+      - "8080:8000"
+    environment:
+      BASE_TERRAIN_PATH: "/tilesets"
+      LOG_LEVEL: notice
+    volumes:
+      - ./data:/data
+    depends_on:
+      - terrain-server
+    restart: unless-stopped
+
+volumes:
+  redis_data:
