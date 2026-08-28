@@ -29,38 +29,19 @@ services:
     depends_on:
       - redis
 
+  # Nginx: terrain tiles + Cesium preview + /api/ proxy (same-origin)
+  # Open http://localhost:8103/preview/?tileset={name}
   terrain-server:
-    build:
-      context: ../cesium-terrain-server/docker
-      dockerfile: Dockerfile
-    image: geodata/cesium-terrain-server:local
+    image: nginx:latest
     ports:
-      - "8081:8000"
-    environment:
-      SERVE_STATIC: "0"
-      BASE_TERRAIN_PATH: "/tilesets"
-      LOG_LEVEL: notice
+      - "8103:80"
     volumes:
       # Full data mount so tileset symlinks (../../jobs/...) resolve inside the container.
       - ./data:/data
-    restart: unless-stopped
-
-  # Cesium static preview UI (same image / tiles data as terrain-server).
-  # Open http://localhost:8080/?tileset={name}
-  terrain-preview:
-    build:
-      context: ../cesium-terrain-server/docker
-      dockerfile: Dockerfile
-    image: geodata/cesium-terrain-server:local
-    ports:
-      - "8080:8000"
-    environment:
-      BASE_TERRAIN_PATH: "/tilesets"
-      LOG_LEVEL: notice
-    volumes:
-      - ./data:/data
+      - ./scripts/preview:/usr/share/nginx/preview:ro
+      - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
-      - terrain-server
+      - api
     restart: unless-stopped
 
 volumes:

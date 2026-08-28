@@ -1,4 +1,4 @@
-"""Register completed tilesets for cesium-terrain-server."""
+"""Register completed tilesets for nginx terrain-server."""
 
 import logging
 import os
@@ -73,7 +73,7 @@ def publish_tileset(
     tileset_name: str | None = None,
 ) -> tuple[str, str]:
     """
-    Prepare layer.json and register tiles for cesium-terrain-server.
+    Prepare layer.json and register tiles for terrain-server (nginx).
 
     Returns (terrain_url, resolved_tileset_name).
     """

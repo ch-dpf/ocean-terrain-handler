@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     gdal_cachemax: int = 512
     job_ttl: int = 604800
 
-    terrain_server_public_url: str = "http://localhost:8081"
+    terrain_server_public_url: str = "http://localhost:8103"
     terrain_base_path: str = "/tilesets"
     auto_publish: bool = True
 

@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>地形瓦片发布服务</title>
+  <script src="https://cesium.com/downloads/cesiumjs/releases/1.120/Build/Cesium/Cesium.js"></script>
+  <link href="https://cesium.com/downloads/cesiumjs/releases/1.120/Build/Cesium/Widgets/widgets.css" rel="stylesheet" />
+  <link href="/preview/styles.css" rel="stylesheet" />
+  <style>
+    html, body { width: 100%; height: 100%; margin: 0; padding: 0; overflow: hidden; }
+    #pageHeader { position: fixed; top: 0; left: 0; right: 0; z-index: 1100; height: 48px; display: flex; align-items: center; justify-content: center; background: rgba(32,32,32,0.92); border-bottom: 1px solid rgba(255,255,255,0.1); color: #fff; font-family: sans-serif; }
+    #pageTitle { margin: 0; font-size: 15px; font-weight: 600; }
+    #appShell { position: fixed; top: 48px; left: 0; right: 0; bottom: 0; display: flex; }
+    #sideNav { width: 132px; flex-shrink: 0; background: rgba(32,32,32,0.94); border-right: 1px solid rgba(255,255,255,0.1); }
+    #mapArea { flex: 1; position: relative; overflow: hidden; }
+    #cesiumContainer { width: 100%; height: 100%; }
+    #info { position: absolute; left: 10px; bottom: 28px; z-index: 1000; background: rgba(42,42,42,0.85); color: #fff; padding: 8px 12px; border-radius: 4px; font-size: 13px; }
+    .panel-overlay, .popup-panel { display: none; }
+  </style>
+</head>
+<body>
+  <header id="pageHeader">
+    <h1 id="pageTitle">地形瓦片发布服务</h1>
+  </header>
+
+  <div id="appShell">
+    <nav id="sideNav" aria-label="主导航">
+      <ul class="side-nav-menu">
+        <li><button type="button" class="side-nav-item" data-panel="ingest">数据接入</button></li>
+        <li><button type="button" class="side-nav-item" data-panel="progress">进度查询</button></li>
+        <li><button type="button" class="side-nav-item" data-panel="publish">瓦片发布</button></li>
+        <li><button type="button" class="side-nav-item" data-panel="layers">图层管理</button></li>
+      </ul>
+    </nav>
+
+    <main id="mapArea">
+      <div id="cesiumContainer"></div>
+      <div id="errorBanner"></div>
+      <div id="panelOverlay" class="panel-overlay"></div>
+
+      <aside id="ingestPanel" class="popup-panel" aria-label="数据接入">
+        <div class="panel-header">
+          <h2>数据接入</h2>
+          <button type="button" class="panel-close" aria-label="关闭">×</button>
+        </div>
+        <div class="panel-body">
+          <div class="panel-subtabs">
+            <button type="button" class="panel-subtab active" data-submit-tab="upload">本地上传</button>
+            <button type="button" class="panel-subtab" data-submit-tab="workspace">服务器文件</button>
+          </div>
+
+          <div id="uploadTabPanel" class="tab-panel active">
+            <div class="form-row">
+              <label for="uploadFile">GeoTIFF 高程 (.tif / .tiff / .dem / .img)</label>
+              <input type="file" id="uploadFile" accept=".tif,.tiff,.dem,.img" />
+            </div>
+            <div class="panel-actions">
+              <button type="button" id="uploadSubmitBtn">上传并开始处理</button>
+            </div>
+          </div>
+
+          <div id="workspaceTabPanel" class="tab-panel">
+            <div id="workspacePath" class="workspace-path"></div>
+            <div id="workspaceBreadcrumb" class="workspace-breadcrumb"></div>
+            <ul id="workspaceList" class="workspace-list">
+              <li class="empty-hint">切换到本标签后自动加载</li>
+            </ul>
+            <div class="panel-actions">
+              <button type="button" id="workspaceSubmitBtn" disabled>提交选中文件</button>
+            </div>
+          </div>
+
+          <details class="advanced-options" id="advancedOptions">
+            <summary>高级选项</summary>
+            <div class="options-section">
+              <h3>预处理</h3>
+              <div class="form-row">
+                <label for="optTargetCrs">目标坐标系</label>
+                <input type="text" id="optTargetCrs" value="EPSG:4326" />
+              </div>
+              <div class="form-row form-checks">
+                <label><input type="checkbox" id="optFillNodata" checked /> 填充 NODATA</label>
+                <label><input type="checkbox" id="optBuildOverviews" checked /> 构建概览图</label>
+              </div>
+            </div>
+            <div class="options-section">
+              <h3>切片 (CTB)</h3>
+              <div class="form-grid">
+                <div class="form-row">
+                  <label for="optOutputFormat">输出格式</label>
+                  <select id="optOutputFormat">
+                    <option value="Mesh" selected>Mesh (quantized-mesh)</option>
+                    <option value="Terrain">Terrain (heightmap)</option>
+                  </select>
+                </div>
+                <div class="form-row">
+                  <label for="optProfile">Profile</label>
+                  <select id="optProfile">
+                    <option value="geodetic" selected>geodetic</option>
+                    <option value="mercator">mercator</option>
+                  </select>
+                </div>
+                <div class="form-row">
+                  <label for="optStartZoom">起始 zoom（留空自动）</label>
+                  <input type="number" id="optStartZoom" min="0" placeholder="自动" />
+                </div>
+                <div class="form-row">
+                  <label for="optEndZoom">结束 zoom</label>
+                  <input type="number" id="optEndZoom" min="0" value="0" />
+                </div>
+                <div class="form-row">
+                  <label for="optThreadCount">并行线程（留空默认）</label>
+                  <input type="number" id="optThreadCount" min="1" placeholder="默认" />
+                </div>
+              </div>
+              <div class="form-row form-checks">
+                <label><input type="checkbox" id="optCesiumFriendly" checked /> Cesium 兼容根瓦片</label>
+                <label><input type="checkbox" id="optVertexNormals" /> 顶点法线（Mesh）</label>
+                <label><input type="checkbox" id="optResume" /> 断点续切</label>
+              </div>
+            </div>
+            <div class="options-section">
+              <h3>发布</h3>
+              <div class="form-row">
+                <label for="optTilesetName">Tileset 名称（可选）</label>
+                <input type="text" id="optTilesetName" placeholder="留空则使用 job_id" />
+              </div>
+              <div class="form-row form-checks">
+                <label><input type="checkbox" id="optAutoPublish" checked /> 完成后自动发布</label>
+              </div>
+            </div>
+          </details>
+
+          <div id="submitStatus"></div>
+        </div>
+      </aside>
+
+      <aside id="layersPanel" class="popup-panel" aria-label="图层管理">
+        <div class="panel-header">
+          <h2>已发布地形</h2>
+          <button type="button" class="panel-close" aria-label="关闭">×</button>
+        </div>
+        <div class="panel-body">
+          <div class="panel-actions">
+            <button type="button" id="refreshTilesetsBtn">刷新列表</button>
+          </div>
+          <ul id="tilesetList" class="tileset-list">
+            <li class="empty-hint">打开面板后自动加载</li>
+          </ul>
+        </div>
+      </aside>
+
+      <aside id="progressPanel" class="popup-panel" aria-label="进度查询">
+        <div class="panel-header">
+          <h2>进度查询</h2>
+          <button type="button" class="panel-close" aria-label="关闭">×</button>
+        </div>
+        <div class="panel-body">
+          <div class="form-row">
+            <label for="jobIdInput">任务 ID</label>
+            <input type="text" id="jobIdInput" placeholder="输入 job_id" />
+          </div>
+          <div class="panel-actions">
+            <button type="button" id="lookupJobBtn">查询 / 轮询</button>
+            <button type="button" class="secondary" id="openJobTilesetBtn" disabled>在地图中打开</button>
+          </div>
+          <dl id="jobDetail" class="job-detail">
+            <dt>说明</dt>
+            <dd>在「数据接入」提交任务后，在此查看进度；发布完成后可一键预览。</dd>
+          </dl>
+        </div>
+      </aside>
+
+      <aside id="publishPanel" class="popup-panel" aria-label="瓦片发布">
+        <div class="panel-header">
+          <h2>瓦片发布</h2>
+          <button type="button" class="panel-close" aria-label="关闭">×</button>
+        </div>
+        <div class="panel-body">
+          <div class="form-row">
+            <label for="publishJobIdInput">任务 ID</label>
+            <input type="text" id="publishJobIdInput" placeholder="已完成的 job_id" />
+          </div>
+          <div class="form-row">
+            <label for="tilesetNameInput">Tileset 名称（可选）</label>
+            <input type="text" id="tilesetNameInput" placeholder="留空则使用 job_id" />
+          </div>
+          <div class="panel-actions">
+            <button type="button" id="publishJobBtn">发布</button>
+            <button type="button" class="secondary" id="unpublishJobBtn">下架</button>
+          </div>
+          <div id="publishStatus"></div>
+        </div>
+      </aside>
+
+      <div id="info">
+        <div id="status">Loading preview…</div>
+        <div id="coords">tileset: —</div>
+      </div>
+    </main>
+
+    <aside id="rightSidebar" class="right-sidebar" aria-label="地形分析">
+      <button type="button" id="rightSidebarToggle" class="right-sidebar-toggle" aria-label="收起右侧栏" title="收起 / 展开">»</button>
+      <div class="right-sidebar-inner">
+        <section class="sidebar-section open" id="shadingSection">
+          <button type="button" class="sidebar-section-header" data-section="shading" aria-expanded="true">
+            <span>着色</span>
+            <span class="section-chevron">▾</span>
+          </button>
+          <div class="sidebar-section-body">
+            <div class="shading-grid" role="group" aria-label="着色模式">
+              <button type="button" class="shading-btn" data-shading="elevation" title="高程着色">
+                <span class="shading-icon" aria-hidden="true">▥</span>
+                <span>高程</span>
+              </button>
+              <button type="button" class="shading-btn" data-shading="slope" title="坡度着色">
+                <span class="shading-icon" aria-hidden="true">∿</span>
+                <span>坡度</span>
+              </button>
+              <button type="button" class="shading-btn" data-shading="aspect" title="坡向着色">
+                <span class="shading-icon" aria-hidden="true">▲</span>
+                <span>坡向</span>
+              </button>
+              <button type="button" class="shading-btn" data-shading="contour" title="等高线">
+                <span class="shading-icon" aria-hidden="true">◎</span>
+                <span>等高线</span>
+              </button>
+            </div>
+
+            <input type="hidden" id="optShadingMode" value="none" />
+            <input type="checkbox" id="optElevationContour" hidden />
+
+            <div id="elevationOptions" class="visualize-options" hidden>
+              <div class="form-row">
+                <label for="optRampPreset">高程色带</label>
+                <select id="optRampPreset">
+                  <option value="hypsometric" selected>Hypsometric（通用）</option>
+                  <option value="ocean">Ocean（水深）</option>
+                  <option value="terrain">Terrain（陆地）</option>
+                </select>
+              </div>
+              <div class="form-grid">
+                <div class="form-row">
+                  <label for="optMinHeight">最低（米）</label>
+                  <input type="number" id="optMinHeight" step="1" value="-500" />
+                </div>
+                <div class="form-row">
+                  <label for="optMaxHeight">最高（米）</label>
+                  <input type="number" id="optMaxHeight" step="1" value="3000" />
+                </div>
+              </div>
+              <div class="panel-actions">
+                <button type="button" id="autoHeightRangeBtn">自动计算范围</button>
+              </div>
+            </div>
+
+            <div id="contourOptions" class="visualize-options" hidden>
+              <div class="form-row">
+                <label for="optContourSpacing">间距（米）</label>
+                <input type="number" id="optContourSpacing" min="1" step="1" value="150" />
+              </div>
+              <div class="form-row">
+                <label for="optContourWidth">线宽（像素）</label>
+                <input type="number" id="optContourWidth" min="1" max="8" step="0.5" value="2" />
+              </div>
+            </div>
+
+            <div id="elevationLegend" class="elevation-legend" hidden>
+              <span class="legend-label legend-low" id="legendLow">—</span>
+              <canvas id="legendCanvas" width="160" height="14" aria-hidden="true"></canvas>
+              <span class="legend-label legend-high" id="legendHigh">—</span>
+            </div>
+
+            <div class="panel-actions sidebar-actions">
+              <button type="button" class="secondary" id="resetVisualizeBtn">清除着色</button>
+            </div>
+            <div id="visualizeStatus"></div>
+          </div>
+        </section>
+      </div>
+    </aside>
+  </div>
+
+  <div id="toastContainer" class="toast-container"></div>
+  <script src="/preview/app.js"></script>
+</body>
+</html>

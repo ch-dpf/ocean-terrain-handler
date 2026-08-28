@@ -137,3 +137,19 @@ class TilesetInfo(BaseModel):
 
 class TilesetListResponse(BaseModel):
     tilesets: list[TilesetInfo]
+
+
+class WorkspaceEntryInfo(BaseModel):
+    name: str
+    relative_path: str
+    absolute_path: str
+    entry_type: str
+    size_bytes: int | None = None
+    selectable: bool
+
+
+class WorkspaceListResponse(BaseModel):
+    relative_path: str
+    absolute_path: str
+    parent_relative_path: str | None = None
+    entries: list[WorkspaceEntryInfo]

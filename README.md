@@ -8,10 +8,12 @@
 客户端 → FastAPI → Redis 队列 → Celery Worker
                                     ├─ GDAL 预处理 (gdalwarp / fillnodata / gdaladdo)
                                     ├─ ctb-tile (本地 Docker 镜像) → 瓦片输出
-                                    └─ 注册 tileset → cesium-terrain-server 发布
+                                    └─ 注册 tileset → data/tilesets/terrain/
 
-Cesium 客户端 → cesium-terrain-server :8081/tilesets/{name}/
-浏览器预览 → terrain-preview :8080/?tileset={name}
+浏览器 / Cesium 客户端 → nginx terrain-server :8103
+                           ├─ /tilesets/{name}/     地形瓦片 + layer.json
+                           ├─ /preview/             Cesium 预览 UI
+                           └─ /api/                 反代 FastAPI（同源）
 ```
 
 | 组件 | 职责 |
@@ -19,8 +21,7 @@ Cesium 客户端 → cesium-terrain-server :8081/tilesets/{name}/
 | API | 接收任务、文件上传、查询状态、发布管理 |
 | Worker | GDAL 预处理 + 调用 CTB 切片 + 注册发布 |
 | Redis | 任务队列与状态存储 |
-| terrain-server | HTTP 发布 Cesium 地形瓦片（无静态页） |
-| terrain-preview | Cesium 预览页（`:8080`，同源加载瓦片） |
+| terrain-server (nginx) | 地形瓦片 HTTP 发布 + Cesium 预览页 + API 反代 |
 | 工作目录 | 输入 DEM、中间产物、瓦片输出、发布注册 |
 
 ## 处理流程
@@ -30,7 +31,7 @@ Cesium 客户端 → cesium-terrain-server :8081/tilesets/{name}/
 3. **NODATA 填充** — `gdal_fillnodata.py`（CTB 不处理空值，必须预处理）
 4. **概览图** — `gdaladdo` 加速大文件切片
 5. **切片** — `ctb-tile` 生成 `{z}/{x}/{y}.terrain`
-6. **发布** — 生成/校验 `layer.json`，注册到 `data/tilesets/terrain/{name}`，由 cesium-terrain-server 对外服务
+6. **发布** — 生成/校验 `layer.json`，注册到 `data/tilesets/terrain/{name}`，由 nginx 对外服务
 
 ## CTB 镜像（本地自构建）
 
@@ -64,18 +65,6 @@ docker run --rm cesium-terrain-builder:local ctb-tile --version
 
 - Docker & Docker Compose
 - 已构建本地 CTB 镜像：`cesium-terrain-builder:local`（见上方构建步骤）
-- 同级目录存在 `cesium-terrain-server` 源码（Compose 会本地构建 terrain-server 镜像，**不再拉取** Docker Hub 上的 `geodata/cesium-terrain-server`，该远程镜像 manifest 过旧，新版 containerd 无法使用）
-
-```bash
-# 若尚未 clone
-git clone https://github.com/geo-data/cesium-terrain-server D:\workspace\cesium-terrain-server
-```
-
-可选：单独构建 terrain-server 镜像（源码变更后）：
-
-```powershell
-.\scripts\build-terrain-server.ps1
-```
 
 ### 启动
 
@@ -85,10 +74,21 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-服务地址：`http://localhost:8000`  
-API 文档：`http://localhost:8000/docs`  
-地形发布：`http://localhost:8081/tilesets/{tileset_name}/`  
-地形预览：`http://localhost:8080/?tileset={tileset_name}`（默认按 `layer.json` 的 `available` 自动飞到覆盖区；可选 `lon`/`lat`/`height` 覆盖视角）
+服务地址：
+
+| 服务 | URL |
+|------|-----|
+| API | `http://localhost:8000` |
+| API 文档 | `http://localhost:8000/docs` |
+| 地形发布 | `http://localhost:8103/tilesets/{tileset_name}/` |
+| 预览 UI | `http://localhost:8103/preview/?tileset={tileset_name}` |
+
+预览页支持侧边栏：数据接入、进度查询、瓦片发布、图层管理。URL 参数：
+
+- `?tileset={name}` — 加载已发布地形
+- `?job={job_id}` — 打开进度面板并轮询
+- `?lon=&lat=&height=` — 手动设置相机
+- `?exaggeration=N` — 垂直夸大（调试用，默认 1.0 真实比例）
 
 ### 提交任务（quantized-mesh 示例）
 
@@ -134,7 +134,7 @@ curl http://localhost:8000/api/v1/terrain/jobs/{job_id}
 任务状态：`queued` → `preprocessing` → `tiling` → `publishing` → `completed` / `failed`
 
 输出目录：`./data/jobs/{job_id}/tiles/`  
-发布 URL：`http://localhost:8081/tilesets/{job_id}/`（任务完成后自动发布，见 `publish` 参数）
+发布 URL：`http://localhost:8103/tilesets/{job_id}/`（任务完成后自动发布，见 `publish` 参数）
 
 ### 查询已发布 tileset
 
@@ -156,7 +156,7 @@ curl -X DELETE http://localhost:8000/api/v1/terrain/jobs/{job_id}/publish
 
 ```javascript
 viewer.terrainProvider = await Cesium.CesiumTerrainProvider.fromUrl(
-  "http://localhost:8081/tilesets/{job_id}"
+  "http://localhost:8103/tilesets/{job_id}"
 );
 ```
 
@@ -221,6 +221,8 @@ celery -A app.worker.celery_app worker --loglevel=info
 
 本地 Worker 需安装 GDAL 命令行工具，并确保 Docker 可执行且已构建 `cesium-terrain-builder:local` 镜像。
 
+预览与瓦片发布需单独启动 nginx（或使用 `docker compose up terrain-server`）。
+
 ## 项目结构
 
 ```
@@ -239,6 +241,9 @@ ocean-terrain-handler/
 │   └── worker/
 │       ├── celery_app.py    # Celery 配置
 │       └── tasks.py         # 异步任务
+├── docker/
+│   └── nginx.conf           # 地形瓦片 + 预览 + API 反代
+├── scripts/preview/         # Cesium 预览 SPA
 ├── tests/
 ├── docker-compose.yml
 ├── Dockerfile
@@ -255,7 +260,7 @@ ocean-terrain-handler/
 | `CTB_DOCKER_IMAGE` | `cesium-terrain-builder:local` | 本地自构建 CTB 镜像名 |
 | `GDAL_CACHEMAX` | `512` | GDAL 缓存 (MB) |
 | `JOB_TTL` | `604800` | 任务状态保留 (秒) |
-| `TERRAIN_SERVER_PUBLIC_URL` | `http://localhost:8081` | terrain-server 对外 URL |
+| `TERRAIN_SERVER_PUBLIC_URL` | `http://localhost:8103` | terrain-server（nginx）对外 URL |
 | `TERRAIN_BASE_PATH` | `/tilesets` | 地形 URL 前缀 |
 | `AUTO_PUBLISH` | `true` | 切片完成后自动发布 |
 
@@ -267,8 +272,9 @@ ocean-terrain-handler/
 - NODATA 必须在切片前填充，否则 CTB 无法正确处理
 - 大文件建议设置 `start_zoom` / `end_zoom` 分级切片，避免低级别 zoom 溢出
 - Worker 容器需挂载 `/var/run/docker.sock` 以调用宿主机上的 CTB 镜像
-- `data/tilesets/terrain/` 目录必须存在，terrain-server 启动前会自动创建
+- `data/tilesets/terrain/` 目录必须存在，API 启动时会自动创建
 - 发布通过符号链接注册瓦片，Worker 容器需有创建 symlink 的权限
+- 预览页通过 Cesium CDN 加载（需联网）；地形瓦片由 nginx 本地提供
 
 ## License
 

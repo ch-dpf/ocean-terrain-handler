@@ -5,7 +5,7 @@ import shutil
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, Body, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Body, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
@@ -18,9 +18,12 @@ from app.schemas import (
     TerrainJobResponse,
     TilesetInfo,
     TilesetListResponse,
+    WorkspaceEntryInfo,
+    WorkspaceListResponse,
 )
 from app.services.job_store import JobStore
 from app.services.tile_publisher import PublishError, list_published_tilesets
+from app.services.workspace_browser import WorkspacePathError, list_workspace
 from app.worker.tasks import (
     create_job_from_path,
     create_job_from_upload,
@@ -151,7 +154,7 @@ async def publish_job(
     job_id: str,
     body: ManualPublishRequest | None = Body(default=None),
 ) -> TerrainJobDetail:
-    """Publish a completed job's tiles via cesium-terrain-server."""
+    """Publish a completed job's tiles via terrain-server (nginx)."""
     tileset_name = body.tileset_name if body is not None else None
     try:
         publish_completed_job(job_id, tileset_name=tileset_name)
@@ -182,7 +185,7 @@ async def unpublish_job(job_id: str) -> TerrainJobDetail:
 
 @router.get("/tilesets", response_model=TilesetListResponse)
 async def list_tilesets() -> TilesetListResponse:
-    """List tilesets registered for cesium-terrain-server."""
+    """List tilesets registered for terrain-server (nginx)."""
     settings = get_settings()
     names = list_published_tilesets(settings.tilesets_dir)
     tilesets = [
@@ -190,3 +193,32 @@ async def list_tilesets() -> TilesetListResponse:
         for name in names
     ]
     return TilesetListResponse(tilesets=tilesets)
+
+
+@router.get("/workspace", response_model=WorkspaceListResponse)
+async def list_workspace_entries(
+    path: str = Query(default="", description="Directory path relative to workspace root"),
+) -> WorkspaceListResponse:
+    """List directories and selectable DEM files in the workspace."""
+    settings = get_settings()
+    try:
+        listing = list_workspace(settings.workspace_dir, path)
+    except WorkspacePathError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return WorkspaceListResponse(
+        relative_path=listing.relative_path,
+        absolute_path=listing.absolute_path,
+        parent_relative_path=listing.parent_relative_path,
+        entries=[
+            WorkspaceEntryInfo(
+                name=entry.name,
+                relative_path=entry.relative_path,
+                absolute_path=entry.absolute_path,
+                entry_type=entry.entry_type,
+                size_bytes=entry.size_bytes,
+                selectable=entry.selectable,
+            )
+            for entry in listing.entries
+        ],
+    )
