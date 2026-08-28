@@ -42,9 +42,9 @@ class Profile(str, Enum):
 
 
 class PreprocessOptions(BaseModel):
-    target_crs: str = Field(default="EPSG:4326", description="Target CRS for gdalwarp")
+    target_crs: str = Field(default="EPSG:4326", description="Target CRS for gdal raster reproject")
     fill_nodata: bool = Field(default=True, description="Fill NODATA before tiling")
-    build_overviews: bool = Field(default=True, description="Build overviews with gdaladdo")
+    build_overviews: bool = Field(default=True, description="Build overviews with gdal raster overview add")
     # GeoTIFF TileWidth/TileHeight must be multiples of 16 (not CTB's 65px mesh size).
     block_size: int = Field(
         default=256,

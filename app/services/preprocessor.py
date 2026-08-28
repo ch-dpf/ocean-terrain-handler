@@ -1,6 +1,7 @@
-"""GDAL preprocessing pipeline."""
+"""GDAL preprocessing pipeline (GDAL 3.12+ unified CLI)."""
 
 import logging
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -9,14 +10,29 @@ from app.schemas import PreprocessOptions
 
 logger = logging.getLogger(__name__)
 
+_FILL_NODATA_MAX_DISTANCE = 10
+_OVERVIEW_LEVELS = "2,4,8,16"
+
 
 class PreprocessError(RuntimeError):
     pass
 
 
-def _run(cmd: list[str], env: dict[str, str] | None = None) -> None:
+def _build_env(gdal_cachemax: int) -> dict[str, str]:
+    env = os.environ.copy()
+    env["GDAL_CACHEMAX"] = str(gdal_cachemax)
+    return env
+
+
+def _run(cmd: list[str], *, gdal_cachemax: int) -> None:
     logger.info("Running: %s", " ".join(cmd))
-    result = subprocess.run(cmd, capture_output=True, text=True, env=env, check=False)
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        env=_build_env(gdal_cachemax),
+        check=False,
+    )
     if result.returncode != 0:
         raise PreprocessError(
             f"Command failed ({result.returncode}): {' '.join(cmd)}\n"
@@ -24,16 +40,74 @@ def _run(cmd: list[str], env: dict[str, str] | None = None) -> None:
         )
 
 
-def gdal_info(dataset: Path) -> str:
+def gdal_info(dataset: Path, *, gdal_cachemax: int = 512) -> str:
     result = subprocess.run(
-        ["gdalinfo", str(dataset)],
+        ["gdal", "raster", "info", "--format=text", str(dataset)],
         capture_output=True,
         text=True,
+        env=_build_env(gdal_cachemax),
         check=False,
     )
     if result.returncode != 0:
-        raise PreprocessError(f"gdalinfo failed: {result.stderr}")
+        raise PreprocessError(f"gdal raster info failed: {result.stderr}")
     return result.stdout
+
+
+def _reproject_cmd(
+    input_path: Path,
+    output_path: Path,
+    options: PreprocessOptions,
+) -> list[str]:
+    cmd = [
+        "gdal",
+        "raster",
+        "reproject",
+        "--dst-crs",
+        options.target_crs,
+        "-r",
+        "bilinear",
+        "--co",
+        "TILED=YES",
+        "--co",
+        f"BLOCKXSIZE={options.block_size}",
+        "--co",
+        f"BLOCKYSIZE={options.block_size}",
+        "--co",
+        "COMPRESS=DEFLATE",
+        "--overwrite",
+    ]
+    if options.nodata_value is not None:
+        nodata = str(options.nodata_value)
+        cmd.extend(["--input-nodata", nodata, "--output-nodata", nodata])
+    cmd.extend([str(input_path), str(output_path)])
+    return cmd
+
+
+def _fill_nodata_cmd(input_path: Path, output_path: Path) -> list[str]:
+    return [
+        "gdal",
+        "raster",
+        "fill-nodata",
+        "--max-distance",
+        str(_FILL_NODATA_MAX_DISTANCE),
+        "--overwrite",
+        str(input_path),
+        str(output_path),
+    ]
+
+
+def _overview_add_cmd(dataset: Path) -> list[str]:
+    return [
+        "gdal",
+        "raster",
+        "overview",
+        "add",
+        "-r",
+        "average",
+        "--levels",
+        _OVERVIEW_LEVELS,
+        str(dataset),
+    ]
 
 
 def preprocess_dem(
@@ -44,43 +118,22 @@ def preprocess_dem(
 ) -> Path:
     """Run GDAL preprocessing and return path to CTB-ready raster."""
     work_dir.mkdir(parents=True, exist_ok=True)
-    env = {"GDAL_CACHEMAX": str(gdal_cachemax)}
+
+    gdal_info(input_path, gdal_cachemax=gdal_cachemax)
 
     warped = work_dir / "warped.tif"
     filled = work_dir / "filled.tif"
     final = work_dir / "preprocessed.tif"
 
-    _run(
-        [
-            "gdalwarp",
-            "-t_srs",
-            options.target_crs,
-            "-r",
-            "bilinear",
-            "-co",
-            "TILED=YES",
-            "-co",
-            f"BLOCKXSIZE={options.block_size}",
-            "-co",
-            f"BLOCKYSIZE={options.block_size}",
-            "-co",
-            "COMPRESS=DEFLATE",
-            str(input_path),
-            str(warped),
-        ],
-        env=env,
-    )
+    _run(_reproject_cmd(input_path, warped, options), gdal_cachemax=gdal_cachemax)
 
     current = warped
     if options.fill_nodata:
-        fill_cmd = ["gdal_fillnodata.py", "-md", "10", str(current), str(filled)]
-        if options.nodata_value is not None:
-            fill_cmd[1:1] = ["-nodata", str(options.nodata_value)]
-        _run(fill_cmd, env=env)
+        _run(_fill_nodata_cmd(current, filled), gdal_cachemax=gdal_cachemax)
         current = filled
 
     if options.build_overviews:
-        _run(["gdaladdo", "-r", "average", str(current), "2", "4", "8", "16"], env=env)
+        _run(_overview_add_cmd(current), gdal_cachemax=gdal_cachemax)
 
     if current == warped:
         shutil.copy2(warped, final)

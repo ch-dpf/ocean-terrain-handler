@@ -1,16 +1,17 @@
-FROM python:3.12-slim
+FROM ghcr.io/osgeo/gdal:ubuntu-small-3.12.4
 
-# docker-cli only: talk to host Docker via mounted /var/run/docker.sock.
-# (docker.io on Debian installs dockerd but not the `docker` client.)
+# docker.io client talks to host Docker via mounted /var/run/docker.sock.
+# Do not install gdal-bin here; this image already ships GDAL 3.12.4.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gdal-bin \
-    python3-gdal \
-    docker-cli \
+    python3-venv \
+    docker.io \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 COPY requirements.txt .
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app

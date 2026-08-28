@@ -6,7 +6,7 @@
 
 ```
 客户端 → FastAPI → Redis 队列 → Celery Worker
-                                    ├─ GDAL 预处理 (gdalwarp / fillnodata / gdaladdo)
+                                    ├─ GDAL 预处理 (gdal raster reproject / fill-nodata / overview)
                                     ├─ ctb-tile (本地 Docker 镜像) → 瓦片输出
                                     └─ 注册 tileset → data/tilesets/terrain/
 
@@ -26,10 +26,10 @@
 
 ## 处理流程
 
-1. **校验** — `gdalinfo` 检查输入栅格
-2. **投影** — `gdalwarp` 转为 EPSG:4326（geodetic 推荐）
-3. **NODATA 填充** — `gdal_fillnodata.py`（CTB 不处理空值，必须预处理）
-4. **概览图** — `gdaladdo` 加速大文件切片
+1. **校验** — `gdal raster info` 检查输入栅格
+2. **投影** — `gdal raster reproject` 转为 EPSG:4326（geodetic 推荐）
+3. **NODATA 填充** — `gdal raster fill-nodata`（CTB 不处理空值，必须预处理）
+4. **概览图** — `gdal raster overview add` 加速大文件切片
 5. **切片** — `ctb-tile` 生成 `{z}/{x}/{y}.terrain`
 6. **发布** — 生成/校验 `layer.json`，注册到 `data/tilesets/terrain/{name}`，由 nginx 对外服务
 
@@ -219,7 +219,7 @@ uvicorn app.main:app --reload --port 8000
 celery -A app.worker.celery_app worker --loglevel=info
 ```
 
-本地 Worker 需安装 GDAL 命令行工具，并确保 Docker 可执行且已构建 `cesium-terrain-builder:local` 镜像。
+Worker 镜像基于 `ghcr.io/osgeo/gdal:ubuntu-small-3.12.4`（GDAL 3.12 统一 CLI）。本地开发需安装 GDAL ≥ 3.11，并确保 Docker 可执行且已构建 `cesium-terrain-builder:local` 镜像。
 
 预览与瓦片发布需单独启动 nginx（或使用 `docker compose up terrain-server`）。
 
