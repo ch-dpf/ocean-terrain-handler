@@ -24,8 +24,17 @@ class JobStore:
         data = {
             "job_id": job_id,
             "status": JobStatus.QUEUED.value,
+            "stage": "queued",
             "created_at": now,
             "updated_at": now,
+            "progress": {
+                "percent": 0.0,
+                "phase": "queued",
+                "message": "Queued",
+                "current_zoom": None,
+                "min_zoom": None,
+                "max_zoom": None,
+            },
             **payload,
         }
         self._redis.setex(self._key(job_id), self._ttl, json.dumps(data))
@@ -43,3 +52,8 @@ class JobStore:
         if raw is None:
             return None
         return json.loads(raw)
+
+    @property
+    def redis(self):
+        """Expose Redis client for auxiliary stores (e.g. progress calibration)."""
+        return self._redis

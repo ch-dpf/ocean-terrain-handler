@@ -24,6 +24,14 @@ def test_reproject_cmd_defaults() -> None:
     assert "BLOCKYSIZE=256" in cmd
     assert "COMPRESS=DEFLATE" in cmd
     assert "--overwrite" in cmd
+    assert "--progress" not in cmd
+    assert cmd[-2:] == ["in.tif", "out.tif"]
+
+
+def test_reproject_cmd_with_progress() -> None:
+    options = PreprocessOptions()
+    cmd = _reproject_cmd(Path("in.tif"), Path("out.tif"), options, show_progress=True)
+    assert "--progress" in cmd
     assert cmd[-2:] == ["in.tif", "out.tif"]
 
 
@@ -66,6 +74,12 @@ def test_overview_add_cmd() -> None:
         "2,4,8,16",
         "filled.tif",
     ]
+
+
+def test_overview_add_cmd_with_progress() -> None:
+    cmd = _overview_add_cmd(Path("filled.tif"), show_progress=True)
+    assert "--progress" in cmd
+    assert cmd[-1] == "filled.tif"
 
 
 def test_reproject_cmd_rejects_invalid_block_size() -> None:

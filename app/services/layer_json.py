@@ -3,6 +3,7 @@
 import json
 import logging
 from pathlib import Path
+from typing import TypedDict
 
 from app.schemas import OutputFormat, Profile
 
@@ -18,6 +19,15 @@ FORMAT_MAP = {
 
 class LayerJsonError(RuntimeError):
     pass
+
+
+class LayerDisplayMeta(TypedDict):
+    format: str | None
+    format_label: str | None
+    projection: str | None
+    crs: str | None
+    min_zoom: int | None
+    max_zoom: int | None
 
 
 def scan_tile_extents(tiles_dir: Path) -> dict[int, tuple[int, int, int, int]]:
@@ -123,3 +133,84 @@ def ensure_layer_json(
     layer_path.write_text(json.dumps(content, indent=2), encoding="utf-8")
     logger.info("Wrote layer.json to %s", layer_path)
     return layer_path
+
+
+def format_label_for_format(fmt: str | None) -> str | None:
+    """Return a short display label for a Cesium terrain format string."""
+    if not fmt:
+        return None
+    normalized = fmt.strip().lower()
+    if normalized.startswith("quantized-mesh"):
+        return "量化网格 (Mesh)"
+    if normalized.startswith("heightmap"):
+        return "高度图 (Terrain)"
+    return fmt
+
+
+def crs_label_for_projection(projection: str | None) -> str | None:
+    """Return a human-readable CRS label for a layer.json projection code."""
+    if not projection:
+        return None
+    code = projection.strip().upper()
+    if code in {"EPSG:4326", "WGS84"}:
+        return "EPSG:4326 (WGS84 / 地理)"
+    if code in {"EPSG:3857", "EPSG:900913"}:
+        return "EPSG:3857 (Web 墨卡托)"
+    return projection
+
+
+def zoom_range_from_available(available: object) -> tuple[int | None, int | None]:
+    """Derive min/max zoom from a Cesium ``available`` array."""
+    if not isinstance(available, list) or not available:
+        return None, None
+
+    zooms: list[int] = []
+    for zoom, ranges in enumerate(available):
+        if isinstance(ranges, list) and ranges:
+            zooms.append(zoom)
+
+    if not zooms:
+        return None, None
+    return min(zooms), max(zooms)
+
+
+def read_layer_metadata(tiles_dir: Path) -> LayerDisplayMeta:
+    """Read display metadata from ``layer.json`` under a published tileset directory.
+
+    Missing or unreadable files yield None values without raising.
+    """
+    empty: LayerDisplayMeta = {
+        "format": None,
+        "format_label": None,
+        "projection": None,
+        "crs": None,
+        "min_zoom": None,
+        "max_zoom": None,
+    }
+
+    layer_path = tiles_dir / LAYER_JSON
+    if not layer_path.is_file():
+        return empty
+
+    try:
+        data = json.loads(layer_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return empty
+
+    if not isinstance(data, dict):
+        return empty
+
+    fmt = data.get("format")
+    fmt_str = fmt if isinstance(fmt, str) else None
+    projection = data.get("projection")
+    projection_str = projection if isinstance(projection, str) else None
+    min_zoom, max_zoom = zoom_range_from_available(data.get("available"))
+
+    return {
+        "format": fmt_str,
+        "format_label": format_label_for_format(fmt_str),
+        "projection": projection_str,
+        "crs": crs_label_for_projection(projection_str),
+        "min_zoom": min_zoom,
+        "max_zoom": max_zoom,
+    }

@@ -10,8 +10,12 @@ from app.services.layer_json import (
     LayerJsonError,
     build_available,
     build_layer_json,
+    crs_label_for_projection,
     ensure_layer_json,
+    format_label_for_format,
+    read_layer_metadata,
     scan_tile_extents,
+    zoom_range_from_available,
 )
 
 
@@ -78,3 +82,58 @@ def test_ensure_layer_json_keeps_existing_with_available(tmp_path: Path):
     layer_path = ensure_layer_json(tiles_dir, OutputFormat.MESH, Profile.GEODETIC)
     data = json.loads(layer_path.read_text(encoding="utf-8"))
     assert data == existing
+
+
+def test_format_and_crs_labels():
+    assert format_label_for_format("quantized-mesh-1.0") == "量化网格 (Mesh)"
+    assert format_label_for_format("heightmap-1.0") == "高度图 (Terrain)"
+    assert crs_label_for_projection("EPSG:4326") == "EPSG:4326 (WGS84 / 地理)"
+    assert crs_label_for_projection("EPSG:3857") == "EPSG:3857 (Web 墨卡托)"
+
+
+def test_zoom_range_from_available():
+    assert zoom_range_from_available([]) == (None, None)
+    assert zoom_range_from_available([[], [{"startX": 0, "startY": 0, "endX": 0, "endY": 0}], []]) == (
+        1,
+        1,
+    )
+    assert zoom_range_from_available(
+        [
+            [{"startX": 0, "startY": 0, "endX": 0, "endY": 0}],
+            [],
+            [{"startX": 1, "startY": 1, "endX": 2, "endY": 2}],
+        ]
+    ) == (0, 2)
+
+
+def test_read_layer_metadata(tmp_path: Path):
+    tiles_dir = tmp_path / "tiles"
+    tiles_dir.mkdir()
+    (tiles_dir / "layer.json").write_text(
+        json.dumps(
+            {
+                "format": "quantized-mesh-1.0",
+                "projection": "EPSG:4326",
+                "available": [
+                    [{"startX": 0, "startY": 0, "endX": 0, "endY": 0}],
+                    [],
+                    [{"startX": 1, "startY": 2, "endX": 3, "endY": 4}],
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    meta = read_layer_metadata(tiles_dir)
+    assert meta["format"] == "quantized-mesh-1.0"
+    assert meta["format_label"] == "量化网格 (Mesh)"
+    assert meta["projection"] == "EPSG:4326"
+    assert meta["crs"] == "EPSG:4326 (WGS84 / 地理)"
+    assert meta["min_zoom"] == 0
+    assert meta["max_zoom"] == 2
+
+
+def test_read_layer_metadata_missing_file(tmp_path: Path):
+    meta = read_layer_metadata(tmp_path / "missing")
+    assert meta["format"] is None
+    assert meta["min_zoom"] is None

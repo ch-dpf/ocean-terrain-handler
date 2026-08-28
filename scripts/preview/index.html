@@ -78,8 +78,15 @@
                 <label for="optTargetCrs">目标坐标系</label>
                 <input type="text" id="optTargetCrs" value="EPSG:4326" />
               </div>
+              <div class="form-row">
+                <label for="optBlockSize">GeoTIFF 块大小</label>
+                <select id="optBlockSize">
+                  <option value="256" selected>256</option>
+                  <option value="512">512</option>
+                  <option value="1024">1024</option>
+                </select>
+              </div>
               <div class="form-row form-checks">
-                <label><input type="checkbox" id="optFillNodata" checked /> 填充 NODATA</label>
                 <label><input type="checkbox" id="optBuildOverviews" checked /> 构建概览图</label>
               </div>
             </div>
@@ -89,15 +96,15 @@
                 <div class="form-row">
                   <label for="optOutputFormat">输出格式</label>
                   <select id="optOutputFormat">
-                    <option value="Mesh" selected>Mesh (quantized-mesh)</option>
-                    <option value="Terrain">Terrain (heightmap)</option>
+                    <option value="Mesh" selected>量化网格 (Mesh)</option>
+                    <option value="Terrain">高度图 (Terrain)</option>
                   </select>
                 </div>
                 <div class="form-row">
-                  <label for="optProfile">Profile</label>
+                  <label for="optProfile">瓦片剖分剖面</label>
                   <select id="optProfile">
-                    <option value="geodetic" selected>geodetic</option>
-                    <option value="mercator">mercator</option>
+                    <option value="geodetic" selected>地理剖分（经纬度）</option>
+                    <option value="mercator">墨卡托剖分</option>
                   </select>
                 </div>
                 <div class="form-row">
@@ -108,15 +115,6 @@
                   <label for="optEndZoom">结束 zoom</label>
                   <input type="number" id="optEndZoom" min="0" value="0" />
                 </div>
-                <div class="form-row">
-                  <label for="optThreadCount">并行线程（留空默认）</label>
-                  <input type="number" id="optThreadCount" min="1" placeholder="默认" />
-                </div>
-              </div>
-              <div class="form-row form-checks">
-                <label><input type="checkbox" id="optCesiumFriendly" checked /> Cesium 兼容根瓦片</label>
-                <label><input type="checkbox" id="optVertexNormals" /> 顶点法线（Mesh）</label>
-                <label><input type="checkbox" id="optResume" /> 断点续切</label>
               </div>
             </div>
             <div class="options-section">
@@ -126,7 +124,7 @@
                 <input type="text" id="optTilesetName" placeholder="留空则使用 job_id" />
               </div>
               <div class="form-row form-checks">
-                <label><input type="checkbox" id="optAutoPublish" checked /> 完成后自动发布</label>
+                <label><input type="checkbox" id="optAutoPublish" /> 完成后自动发布</label>
               </div>
             </div>
           </details>
@@ -164,9 +162,26 @@
             <button type="button" id="lookupJobBtn">查询 / 轮询</button>
             <button type="button" class="secondary" id="openJobTilesetBtn" disabled>在地图中打开</button>
           </div>
+          <div id="jobProgress" class="job-progress" hidden>
+            <div class="job-progress-meta">
+              <span id="jobProgressLabel">进度</span>
+              <span id="jobProgressPercent">0%</span>
+            </div>
+            <div
+              class="job-progress-track"
+              role="progressbar"
+              aria-valuemin="0"
+              aria-valuemax="100"
+              aria-valuenow="0"
+              id="jobProgressBar"
+            >
+              <div class="job-progress-fill" id="jobProgressFill"></div>
+            </div>
+            <p class="job-progress-message" id="jobProgressMessage" hidden></p>
+          </div>
           <dl id="jobDetail" class="job-detail">
             <dt>说明</dt>
-            <dd>在「数据接入」提交任务后，在此查看进度；发布完成后可一键预览。</dd>
+            <dd>在「数据接入」提交任务后，在此查看进度条、状态、阶段与耗时。</dd>
           </dl>
         </div>
       </aside>

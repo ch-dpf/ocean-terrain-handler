@@ -133,8 +133,10 @@ curl http://localhost:8000/api/v1/terrain/jobs/{job_id}
 
 任务状态：`queued` → `preprocessing` → `tiling` → `publishing` → `completed` / `failed`
 
+查询响应含量化进度字段 `progress`（`percent` 0–100、`phase`、`message`，切片阶段可含 zoom），以及处理耗时字段 `created_at` / `completed_at` / `elapsed_seconds`。预览页「进度查询」仅展示进度条、状态、阶段与耗时。
+
 输出目录：`./data/jobs/{job_id}/tiles/`  
-发布 URL：`http://localhost:8103/tilesets/{job_id}/`（任务完成后自动发布，见 `publish` 参数）
+发布 URL：`http://localhost:8103/tilesets/{job_id}/`（默认不自动发布，见 `publish.auto_publish` / `AUTO_PUBLISH`）
 
 ### 查询已发布 tileset
 
@@ -142,15 +144,29 @@ curl http://localhost:8000/api/v1/terrain/jobs/{job_id}
 curl http://localhost:8000/api/v1/terrain/tilesets
 ```
 
-### 手动发布 / 取消发布
+响应中每个 tileset 含 `name`、`terrain_url`，以及从 `layer.json` 解析的 `format` / `format_label`、`projection` / `crs`、`min_zoom` / `max_zoom`（无元数据时为 `null`）。预览页「图层管理」以标签展示格式、坐标系与层级。
+
+### 发布 / 下架
 
 ```bash
-# 发布已完成任务
-curl -X POST http://localhost:8000/api/v1/terrain/jobs/{job_id}/publish
+# 按 job 发布（Redis 有记录，或已过期但磁盘仍有 jobs/{id}/tiles/）
+curl -X POST http://localhost:8000/api/v1/terrain/jobs/{job_id}/publish \
+  -H "Content-Type: application/json" \
+  -d '{"tileset_name": "coast-dem"}'
 
-# 取消发布
+# 按 job 下架（Redis 过期时按 job_id 名尽力删链接）
 curl -X DELETE http://localhost:8000/api/v1/terrain/jobs/{job_id}/publish
+
+# 不依赖 Redis：按磁盘路径 / job 目录发布
+curl -X POST http://localhost:8000/api/v1/terrain/tilesets/publish \
+  -H "Content-Type: application/json" \
+  -d '{"job_id": "a0e3214c-cc22-4278-90aa-af20b5745c0a", "tileset_name": "coast-dem"}'
+
+# 按名称下架（不依赖 Redis）
+curl -X DELETE http://localhost:8000/api/v1/terrain/tilesets/{tileset_name}
 ```
+
+`tilesets/publish` 也可传 `tiles_dir`（工作区内路径，与 `job_id` 二选一）。`output_format` / `profile` 可选，缺省时从已有 `layer.json` 推断，否则默认 Mesh + geodetic。
 
 ### Cesium 客户端加载
 
@@ -176,7 +192,7 @@ viewer.terrainProvider = await Cesium.CesiumTerrainProvider.fromUrl(
 
 | 字段 | 类型 | 默认 | 说明 |
 |------|------|------|------|
-| `output_format` | string | `Terrain` | `Terrain`（heightmap-1.0）/ `Mesh`（quantized-mesh-1.0，需本地镜像） |
+| `output_format` | string | `Mesh` | `Mesh`（quantized-mesh-1.0，需本地镜像）/ `Terrain`（heightmap-1.0） |
 | `profile` | string | `geodetic` | `geodetic` / `mercator` |
 | `thread_count` | int | CPU 核数 | 线程数 |
 | `tile_size` | int | 65 | 瓦片像素尺寸 |
@@ -189,14 +205,14 @@ viewer.terrainProvider = await Cesium.CesiumTerrainProvider.fromUrl(
 | `mesh_qfactor` | float | `1.0` | Mesh 几何误差系数 |
 | `layer_only` | bool | `false` | 仅生成 layer.json |
 | `cesium_friendly` | bool | `true` | CesiumJS 兼容根瓦片 |
-| `vertex_normals` | bool | `false` | Mesh 顶点法线（地形光照） |
+| `vertex_normals` | bool | `true` | Mesh 顶点法线（地形光照；仅 `output_format=Mesh` 时生效） |
 | `creation_options` | string[] | `[]` | GDAL 创建选项（非 Terrain 格式） |
 
 ### 发布 `publish`
 
 | 字段 | 类型 | 默认 | 说明 |
 |------|------|------|------|
-| `auto_publish` | bool | `AUTO_PUBLISH` 环境变量 | 切片完成后自动注册到 terrain-server |
+| `auto_publish` | bool | `false`（`AUTO_PUBLISH`） | 切片完成后自动注册到 terrain-server |
 | `tileset_name` | string | job_id | 发布名称，对应 URL `/tilesets/{name}/` |
 
 完整 CLI 参数对照见 [ahuarte47/cesium-terrain-builder](https://github.com/ahuarte47/cesium-terrain-builder/tree/master-quantized-mesh)。
@@ -262,12 +278,12 @@ ocean-terrain-handler/
 | `JOB_TTL` | `604800` | 任务状态保留 (秒) |
 | `TERRAIN_SERVER_PUBLIC_URL` | `http://localhost:8103` | terrain-server（nginx）对外 URL |
 | `TERRAIN_BASE_PATH` | `/tilesets` | 地形 URL 前缀 |
-| `AUTO_PUBLISH` | `true` | 切片完成后自动发布 |
+| `AUTO_PUBLISH` | `false` | 切片完成后自动发布 |
 
 ## 注意事项
 
 - 使用前必须先构建本地 CTB 镜像：`docker build -t cesium-terrain-builder:local D:\workspace\cesium-terrain-builder`
-- 需要 quantized-mesh 格式时，设置 `output_format: "Mesh"`（仅本地镜像支持）
+- 默认输出 `output_format: "Mesh"`（quantized-mesh）；若需 heightmap 再设为 `"Terrain"`
 - 输入 DEM 应为海拔高程数据，多波段栅格仅使用第一波段
 - NODATA 必须在切片前填充，否则 CTB 无法正确处理
 - 大文件建议设置 `start_zoom` / `end_zoom` 分级切片，避免低级别 zoom 溢出

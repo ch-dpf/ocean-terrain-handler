@@ -2,9 +2,11 @@
 
 import logging
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
-from app.schemas import CtbOptions
+from app.schemas import CtbOptions, OutputFormat
+from app.services.job_progress import parse_zoom_level, run_streaming_command
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +92,7 @@ def build_ctb_command(
         cmd.append("-l")
     if options.cesium_friendly:
         cmd.append("-C")
-    if options.vertex_normals:
+    if options.vertex_normals and options.output_format == OutputFormat.MESH:
         cmd.append("-N")
     if options.quiet:
         cmd.append("-q")
@@ -111,6 +113,8 @@ def run_ctb_tile(
     workspace_dir: Path,
     gdal_cachemax: int,
     host_workspace_dir: Path | None = None,
+    *,
+    on_subprogress: Callable[[float, str | None], None] | None = None,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     cmd = build_ctb_command(
@@ -123,9 +127,22 @@ def run_ctb_tile(
         host_workspace_dir=host_workspace_dir,
     )
     logger.info("Running CTB: %s", " ".join(cmd))
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    if result.returncode != 0:
+
+    def _forward(percent: float, message: str | None) -> None:
+        if on_subprogress is None:
+            return
+        zoom = parse_zoom_level(message) if message else None
+        if zoom is not None and (message is None or "zoom" not in message.lower()):
+            message = f"Zoom {zoom}"
+        on_subprogress(percent, message or "Generating terrain tiles")
+
+    try:
+        run_streaming_command(cmd, on_subprogress=_forward if on_subprogress else None)
+    except subprocess.CalledProcessError as exc:
         raise CtbError(
-            f"ctb-tile failed ({result.returncode})\n"
-            f"stdout: {result.stdout}\nstderr: {result.stderr}"
-        )
+            f"ctb-tile failed ({exc.returncode})\n"
+            f"stdout: {exc.output}\nstderr: {exc.stderr}"
+        ) from exc
+
+    if on_subprogress is not None:
+        on_subprogress(100.0, "Tiling complete")

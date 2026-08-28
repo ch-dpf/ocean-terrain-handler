@@ -8,8 +8,12 @@ import pytest
 from app.schemas import OutputFormat, Profile
 from app.services.tile_publisher import (
     PublishError,
+    infer_job_id_from_tiles_dir,
     list_published_tilesets,
+    publish_from_disk,
     publish_tileset,
+    resolve_job_tiles_dir,
+    resolve_tiles_dir_path,
     unpublish_tileset,
 )
 
@@ -128,3 +132,57 @@ def test_unpublish_missing_raises(tile_dirs):
     _, tilesets_dir = tile_dirs
     with pytest.raises(PublishError):
         unpublish_tileset(tilesets_dir, "missing")
+
+
+def test_infer_job_id_from_tiles_dir(tmp_path: Path):
+    tiles_dir = tmp_path / "workspace" / "jobs" / "abc-123" / "tiles"
+    tiles_dir.mkdir(parents=True)
+    assert infer_job_id_from_tiles_dir(tiles_dir) == "abc-123"
+
+
+def test_resolve_job_tiles_dir(tmp_path: Path):
+    jobs_dir = tmp_path / "jobs"
+    tiles_dir = jobs_dir / "job-9" / "tiles"
+    _make_tile(tiles_dir, 0, 0, 0)
+    assert resolve_job_tiles_dir(jobs_dir, "job-9") == tiles_dir.resolve()
+
+
+def test_resolve_tiles_dir_path_rejects_outside_workspace(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside" / "tiles"
+    outside.mkdir(parents=True)
+
+    with pytest.raises(PublishError, match="outside"):
+        resolve_tiles_dir_path(
+            str(outside),
+            workspace_dir=workspace,
+            jobs_dir=workspace / "jobs",
+        )
+
+
+def test_publish_from_disk_by_job_id(tmp_path: Path):
+    if os.name == "nt":
+        pytest.skip("Symlink creation may require elevated privileges on Windows")
+
+    workspace = tmp_path / "workspace"
+    jobs_dir = workspace / "jobs"
+    tilesets_dir = workspace / "tilesets" / "terrain"
+    tiles_dir = jobs_dir / "old-job" / "tiles"
+    _make_tile(tiles_dir, 0, 0, 0)
+
+    terrain_url, name, resolved_dir = publish_from_disk(
+        jobs_dir=jobs_dir,
+        workspace_dir=workspace,
+        tilesets_dir=tilesets_dir,
+        public_url="http://localhost:8103",
+        base_path="/tilesets",
+        job_id="old-job",
+        tileset_name="coast-dem",
+    )
+
+    assert name == "coast-dem"
+    assert terrain_url == "http://localhost:8103/tilesets/coast-dem"
+    assert resolved_dir == tiles_dir.resolve()
+    assert (tilesets_dir / "coast-dem").is_symlink()
+    assert (tiles_dir / "layer.json").is_file()

@@ -3,7 +3,7 @@
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class JobStatus(str, Enum):
@@ -62,7 +62,7 @@ class PreprocessOptions(BaseModel):
 
 
 class CtbOptions(BaseModel):
-    output_format: OutputFormat = OutputFormat.TERRAIN
+    output_format: OutputFormat = OutputFormat.MESH
     profile: Profile = Profile.GEODETIC
     thread_count: int | None = Field(default=None, ge=1)
     tile_size: int | None = Field(default=None, ge=1)
@@ -75,7 +75,8 @@ class CtbOptions(BaseModel):
     mesh_qfactor: float = Field(default=1.0, gt=0)
     layer_only: bool = Field(default=False, description="Only output layer.json")
     cesium_friendly: bool = True
-    vertex_normals: bool = False
+    # Applies only when output_format is Mesh; ignored for Terrain heightmap.
+    vertex_normals: bool = True
     quiet: bool = False
     verbose: bool = False
     creation_options: list[str] = Field(default_factory=list)
@@ -117,10 +118,41 @@ class TerrainJobResponse(BaseModel):
     message: str | None = None
 
 
+class JobProgress(BaseModel):
+    percent: float = Field(ge=0, le=100, description="Overall job completion 0-100")
+    phase: str | None = Field(default=None, description="Current pipeline stage identifier")
+    message: str | None = Field(default=None, description="Human-readable progress detail")
+    current_zoom: int | None = Field(default=None, description="Zoom level currently being generated")
+    min_zoom: int | None = Field(default=None, description="Minimum output zoom level")
+    max_zoom: int | None = Field(default=None, description="Maximum output zoom level")
+    weight_source: str | None = Field(
+        default=None,
+        description="Stage weight source: default (fixed) or historical (calibrated from past jobs)",
+    )
+    calibration_samples: int | None = Field(
+        default=None,
+        description="Number of completed jobs used for historical calibration, if applicable",
+    )
+
+
 class TerrainJobDetail(BaseModel):
     job_id: str
     status: JobStatus
+    progress: JobProgress | None = None
     stage: str | None = None
+    created_at: str | None = Field(
+        default=None,
+        description="UTC ISO-8601 timestamp when the job was created",
+    )
+    completed_at: str | None = Field(
+        default=None,
+        description="UTC ISO-8601 timestamp when the job finished (completed or failed)",
+    )
+    elapsed_seconds: float | None = Field(
+        default=None,
+        ge=0,
+        description="Wall-clock seconds from created_at to completed_at (or now if still running)",
+    )
     input_path: str | None = None
     output_dir: str | None = None
     terrain_url: str | None = None
@@ -133,10 +165,72 @@ class TerrainJobDetail(BaseModel):
 class TilesetInfo(BaseModel):
     name: str
     terrain_url: str
+    format: str | None = Field(
+        default=None,
+        description="Terrain tile format from layer.json (e.g. quantized-mesh-1.0)",
+    )
+    format_label: str | None = Field(
+        default=None,
+        description="Human-readable format label",
+    )
+    projection: str | None = Field(
+        default=None,
+        description="Projection code from layer.json (e.g. EPSG:4326)",
+    )
+    crs: str | None = Field(
+        default=None,
+        description="Human-readable coordinate system label",
+    )
+    min_zoom: int | None = Field(default=None, description="Minimum zoom with available tiles")
+    max_zoom: int | None = Field(default=None, description="Maximum zoom with available tiles")
 
 
 class TilesetListResponse(BaseModel):
     tilesets: list[TilesetInfo]
+
+
+class DiskPublishRequest(BaseModel):
+    """Publish tiles from disk without requiring Redis job metadata."""
+
+    job_id: str | None = Field(
+        default=None,
+        description="Publish jobs/{job_id}/tiles/ (mutually exclusive with tiles_dir)",
+    )
+    tiles_dir: str | None = Field(
+        default=None,
+        description="Absolute or workspace-relative tiles directory (mutually exclusive with job_id)",
+    )
+    tileset_name: str | None = Field(
+        default=None,
+        description="Published tileset name; defaults to job_id",
+    )
+    output_format: OutputFormat | None = Field(
+        default=None,
+        description="Override format when layer.json is missing; defaults to layer.json or Mesh",
+    )
+    profile: Profile | None = Field(
+        default=None,
+        description="Override profile when layer.json is missing; defaults to layer.json or geodetic",
+    )
+
+    @field_validator("job_id", "tiles_dir", "tileset_name")
+    @classmethod
+    def strip_optional_strings(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+    @model_validator(mode="after")
+    def validate_source_fields(self) -> "DiskPublishRequest":
+        if self.job_id and self.tiles_dir:
+            raise ValueError("Provide either job_id or tiles_dir, not both")
+        if not self.job_id and not self.tiles_dir:
+            raise ValueError("Either job_id or tiles_dir is required")
+        if self.tiles_dir and not self.tileset_name and not self.job_id:
+            # job_id is None here; require an explicit published name unless path implies job
+            pass
+        return self
 
 
 class WorkspaceEntryInfo(BaseModel):

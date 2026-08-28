@@ -734,7 +734,16 @@
   }
 
   function validateTilesetName(name) {
-    if (!/^[A-Za-z0-9_-]+$/.test(name)) {
+    const trimmed = (name || "").trim();
+    if (!trimmed) {
+      throw new Error("无效的 tileset 名称");
+    }
+    // Align with backend: reject path segments only; allow Unicode (e.g. 中文名).
+    if (
+      trimmed.includes("/") ||
+      trimmed.includes("\\") ||
+      trimmed.includes("..")
+    ) {
       throw new Error("无效的 tileset 名称");
     }
   }
@@ -778,6 +787,52 @@
     }
   }
 
+  function formatZoomRange(minZoom, maxZoom) {
+    if (minZoom == null || maxZoom == null) {
+      return "—";
+    }
+    if (minZoom === maxZoom) {
+      return String(minZoom);
+    }
+    return minZoom + "–" + maxZoom;
+  }
+
+  function formatClassForItem(item) {
+    const raw = (item.format || "").toLowerCase();
+    if (raw.indexOf("quantized-mesh") === 0 || raw.indexOf("mesh") !== -1) {
+      return "format-mesh";
+    }
+    if (raw.indexOf("heightmap") === 0 || raw.indexOf("terrain") !== -1) {
+      return "format-terrain";
+    }
+    return "";
+  }
+
+  function renderTilesetMeta(item) {
+    const metaEl = document.createElement("div");
+    metaEl.className = "meta";
+
+    const row = document.createElement("div");
+    row.className = "meta-row";
+
+    function addTag(label, className) {
+      const tag = document.createElement("span");
+      tag.className = "meta-tag" + (className ? " " + className : "");
+      tag.textContent = label;
+      row.appendChild(tag);
+    }
+
+    addTag(
+      "格式: " + (item.format_label || item.format || "—"),
+      formatClassForItem(item),
+    );
+    addTag("坐标系: " + (item.crs || item.projection || "—"));
+    addTag("层级: " + formatZoomRange(item.min_zoom, item.max_zoom));
+
+    metaEl.appendChild(row);
+    return metaEl;
+  }
+
   function renderTilesetList(tilesets) {
     const listEl = document.getElementById("tilesetList");
     listEl.innerHTML = "";
@@ -805,6 +860,7 @@
 
       li.appendChild(nameEl);
       li.appendChild(urlEl);
+      li.appendChild(renderTilesetMeta(item));
       li.addEventListener("click", function () {
         loadTileset(item.name, { flyTo: true })
           .then(function () {
@@ -845,7 +901,18 @@
     return "status-badge " + (status || "queued");
   }
 
-  function progressPhaseLabel(stage, status) {
+  function clampPercent(value) {
+    const num = Number(value);
+    if (Number.isNaN(num)) return 0;
+    return Math.max(0, Math.min(100, num));
+  }
+
+  function formatProgressPercent(value) {
+    const percent = clampPercent(value);
+    return (Math.round(percent * 10) / 10).toFixed(percent % 1 === 0 ? 0 : 1) + "%";
+  }
+
+  function progressPhaseLabel(phase) {
     const labels = {
       queued: "排队中",
       initializing: "初始化",
@@ -858,17 +925,78 @@
       publishing: "发布",
       failed: "失败",
     };
-    return labels[stage] || labels[status] || stage || status || "进度";
+    return labels[phase] || phase || "进度";
   }
 
-  function updatePublishControls(job) {
-    lastJobDetail = job;
+  function clearJobProgress() {
+    const progressEl = document.getElementById("jobProgress");
+    const fillEl = document.getElementById("jobProgressFill");
+    const barEl = document.getElementById("jobProgressBar");
+    progressEl.hidden = true;
+    fillEl.style.width = "0%";
+    fillEl.className = "job-progress-fill";
+    barEl.setAttribute("aria-valuenow", "0");
+    document.getElementById("jobProgressPercent").textContent = "0%";
+    document.getElementById("jobProgressLabel").textContent = "进度";
+    document.getElementById("jobProgressMessage").textContent = "";
+  }
+
+  function formatElapsed(seconds) {
+    if (seconds == null || Number.isNaN(Number(seconds))) return "—";
+    const total = Math.max(0, Math.floor(Number(seconds)));
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    if (h > 0) {
+      return h + "小时" + m + "分" + s + "秒";
+    }
+    if (m > 0) {
+      return m + "分" + s + "秒";
+    }
+    return s + "秒";
+  }
+
+  function renderJobProgress(job) {
+    const progressEl = document.getElementById("jobProgress");
+    const fillEl = document.getElementById("jobProgressFill");
+    const barEl = document.getElementById("jobProgressBar");
+    const progress = job && job.progress ? job.progress : null;
+
+    if (!progress && !job) {
+      clearJobProgress();
+      return;
+    }
+
+    let percent = progress ? clampPercent(progress.percent) : 0;
+    if (job.status === "completed") percent = 100;
+    if (job.status === "queued" && !progress) percent = 0;
+
+    progressEl.hidden = false;
+    fillEl.style.width = percent + "%";
+    fillEl.className =
+      "job-progress-fill" +
+      (job.status === "failed"
+        ? " is-failed"
+        : job.status === "completed"
+          ? " is-completed"
+          : "");
+    barEl.setAttribute("aria-valuenow", String(Math.round(percent)));
+    document.getElementById("jobProgressPercent").textContent =
+      formatProgressPercent(percent);
+    document.getElementById("jobProgressLabel").textContent = "进度";
+    document.getElementById("jobProgressMessage").textContent = "";
+  }
+
+  function updatePublishControls(job, options) {
+    lastJobDetail = job || null;
     const publishBtn = document.getElementById("publishJobBtn");
     const unpublishBtn = document.getElementById("unpublishJobBtn");
+    const jobIdPresent = !!(options && options.jobIdPresent);
 
     if (!job) {
-      publishBtn.disabled = true;
-      unpublishBtn.disabled = true;
+      // Redis miss: still allow job-scoped publish/unpublish (disk fallback).
+      publishBtn.disabled = !jobIdPresent;
+      unpublishBtn.disabled = !jobIdPresent;
       return;
     }
 
@@ -880,14 +1008,13 @@
     const detailEl = document.getElementById("jobDetail");
     const previewBtn = document.getElementById("openJobTilesetBtn");
 
+    renderJobProgress(job);
+
+    const phase = (job.progress && job.progress.phase) || job.stage || job.status;
     const lines = [
-      ["任务 ID", job.job_id],
       ["状态", job.status],
-      ["阶段", job.stage || "—"],
-      ["Tileset", job.tileset_name || "—"],
-      ["已发布", job.published ? "是" : "否"],
-      ["地形 URL", job.terrain_url || "—"],
-      ["错误", job.error || "—"],
+      ["阶段", progressPhaseLabel(phase)],
+      ["耗时", formatElapsed(job.elapsed_seconds)],
     ];
 
     detailEl.innerHTML = lines
@@ -1070,27 +1197,19 @@
     const preprocess = {
       target_crs:
         document.getElementById("optTargetCrs").value.trim() || "EPSG:4326",
-      fill_nodata: document.getElementById("optFillNodata").checked,
       build_overviews: document.getElementById("optBuildOverviews").checked,
+      block_size: parseInt(document.getElementById("optBlockSize").value, 10) || 256,
     };
 
     const ctb_options = {
       output_format: document.getElementById("optOutputFormat").value,
       profile: document.getElementById("optProfile").value,
       end_zoom: readOptionalInt("optEndZoom") ?? 0,
-      cesium_friendly: document.getElementById("optCesiumFriendly").checked,
-      vertex_normals: document.getElementById("optVertexNormals").checked,
-      resume: document.getElementById("optResume").checked,
     };
 
     const startZoom = readOptionalInt("optStartZoom");
     if (startZoom !== undefined) {
       ctb_options.start_zoom = startZoom;
-    }
-
-    const threadCount = readOptionalInt("optThreadCount");
-    if (threadCount !== undefined) {
-      ctb_options.thread_count = threadCount;
     }
 
     const publish = {
@@ -1339,7 +1458,7 @@
       updatePublishControls(lastJobDetail);
     } else if (resolvedId) {
       refreshJobOnce(resolvedId).catch(function () {
-        updatePublishControls(null);
+        updatePublishControls(null, { jobIdPresent: true });
       });
     } else {
       updatePublishControls(null);
