@@ -12,6 +12,7 @@ from app.services.raster.affine import Affine
 from app.services.raster.crsutil import (
     WEB_MERCATOR_MAX_LAT,
     crs_epsg,
+    dest_sample_tolerance,
     destination_pixel_size,
     grid_dimension,
     make_transformer,
@@ -31,17 +32,22 @@ def plan_destination_grid(
     dst_crs: CRS,
 ) -> tuple[Affine, int, int]:
     src_bounds = src.bounds
+    px, py = destination_pixel_size(src.crs, dst_crs, src.affine, src.width, src.height)
     if crs_epsg(dst_crs) == 3857:
         wgs84 = parse_crs("EPSG:4326")
-        west, south, east, north = transform_bounds(src.crs, wgs84, src_bounds)
+        wgs_px, wgs_py = destination_pixel_size(src.crs, wgs84, src.affine, src.width, src.height)
+        west, south, east, north = transform_bounds(
+            src.crs, wgs84, src_bounds, dest_abs_tol=dest_sample_tolerance(wgs_px, wgs_py)
+        )
         south = max(south, -WEB_MERCATOR_MAX_LAT)
         north = min(north, WEB_MERCATOR_MAX_LAT)
         left, bottom, right, top = transform_bounds(wgs84, dst_crs, (west, south, east, north))
     else:
-        left, bottom, right, top = transform_bounds(src.crs, dst_crs, src_bounds)
+        left, bottom, right, top = transform_bounds(
+            src.crs, dst_crs, src_bounds, dest_abs_tol=dest_sample_tolerance(px, py)
+        )
     if not np.isfinite([left, bottom, right, top]).all() or right <= left or top <= bottom:
         raise RasterError("Destination extent is empty after reprojection")
-    px, py = destination_pixel_size(src.crs, dst_crs, src.affine, src.width, src.height)
     width = grid_dimension(right - left, px)
     height = grid_dimension(top - bottom, py)
     if width > 2_000_000 or height > 2_000_000:

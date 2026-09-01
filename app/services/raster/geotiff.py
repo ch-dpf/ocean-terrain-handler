@@ -25,8 +25,6 @@ _GEO_KEY_DIRECTORY = 34735
 _GDAL_NODATA = 42113
 _SOFTWARE = "ocean-terrain-handler"
 
-_FULL_LOAD_MAX_BYTES = 128 * 1024 * 1024
-
 
 def _nodata_extratags(nodata: float | None) -> list[tuple]:
     if nodata is None:
@@ -164,7 +162,7 @@ def geotiff_extratags(crs: CRS, affine: Affine, nodata: float | None = None) -> 
     if epsg is None:
         raise RasterError(f"Cannot write GeoTIFF without an EPSG code (got {crs.to_string()})")
     geokeys = _geokey_directory(epsg, projected=crs.is_projected)
-    if abs(affine.b) < 1e-12 and abs(affine.d) < 1e-12:
+    if affine.is_north_up():
         scale = (abs(affine.a), abs(affine.e), 0.0)
         tie = (0.0, 0.0, 0.0, float(affine.c), float(affine.f), 0.0)
         tags = [
@@ -215,7 +213,7 @@ def tiff_compression(compress: str, jpeg_quality: int) -> tuple[str | None, dict
 def _affine_from_geotiff_tags(tags: dict) -> Affine:
     transform = tags.get("ModelTransformation")
     if transform is not None:
-        values = [float(v) for v in transform]
+        values = [float(v) for v in np.asarray(transform, dtype=np.float64).ravel()]
         if len(values) >= 8:
             return Affine(a=values[0], b=values[1], c=values[3], d=values[4], e=values[5], f=values[7])
     scale = tags.get("ModelPixelScale")
@@ -290,7 +288,7 @@ class GeoTiffReader:
             self._cache = _TileCache(cache_bytes)
             self._full: np.ndarray | None = None
             uncompressed = int(self.width) * int(self.height) * int(self.samples) * int(self.dtype.itemsize)
-            load_full = uncompressed <= min(cache_bytes, _FULL_LOAD_MAX_BYTES)
+            load_full = uncompressed <= cache_bytes
             if preload is False:
                 load_full = False
             if load_full:

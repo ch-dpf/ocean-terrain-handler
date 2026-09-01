@@ -6,7 +6,12 @@ from pathlib import Path
 
 from pyproj import CRS
 
-from app.services.raster.crsutil import transform_ring, wgs84_bounds_from_rect
+from app.services.raster.crsutil import (
+    dest_sample_tolerance,
+    destination_pixel_size,
+    transform_ring,
+    wgs84_bounds_from_rect,
+)
 from app.services.raster.geotiff import GeoTiffReader
 from app.services.raster.nodata import json_nodata
 
@@ -18,8 +23,13 @@ def raster_info_json(dataset: Path, cache_bytes: int = 64 * 1024 * 1024) -> dict
         lr = src.affine.xy(src.width, src.height)
         ll = src.affine.xy(0, src.height)
         cx, cy = src.affine.xy(src.width / 2.0, src.height / 2.0)
-        west, south, east, north = wgs84_bounds_from_rect(src.crs, src.bounds)
-        ring = transform_ring(src.crs, CRS.from_epsg(4326), src.bounds)
+        wgs84 = CRS.from_epsg(4326)
+        wgs_px, wgs_py = destination_pixel_size(src.crs, wgs84, src.affine, src.width, src.height)
+        dest_abs_tol = dest_sample_tolerance(wgs_px, wgs_py)
+        west, south, east, north = wgs84_bounds_from_rect(
+            src.crs, src.bounds, dest_abs_tol=dest_abs_tol
+        )
+        ring = transform_ring(src.crs, wgs84, src.bounds, dest_abs_tol=dest_abs_tol)
         return {
             "size": [src.width, src.height],
             "bands": [{"band": i + 1, "colorInterp": _color_interp(src.samples, i)} for i in range(src.samples)],
@@ -75,4 +85,10 @@ def raster_info_text(dataset: Path, cache_bytes: int = 64 * 1024 * 1024) -> str:
 
 def wgs84_bounds(dataset: Path, cache_bytes: int = 64 * 1024 * 1024) -> list[float]:
     with GeoTiffReader(dataset, cache_bytes=cache_bytes, preload=False) as src:
-        return wgs84_bounds_from_rect(src.crs, src.bounds)
+        wgs84 = CRS.from_epsg(4326)
+        wgs_px, wgs_py = destination_pixel_size(src.crs, wgs84, src.affine, src.width, src.height)
+        return wgs84_bounds_from_rect(
+            src.crs,
+            src.bounds,
+            dest_abs_tol=dest_sample_tolerance(wgs_px, wgs_py),
+        )

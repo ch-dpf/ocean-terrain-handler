@@ -20,14 +20,13 @@ RESAMPLE_LANCZOS = "lanczos"
 RESAMPLE_AVERAGE = "average"
 RESAMPLE_MODE = "mode"
 
+# Names that denote the same kernel, not approximations of a different kernel.
 _METHOD_ALIASES = {
     "near": RESAMPLE_NEAREST,
     "nearest": RESAMPLE_NEAREST,
     "bilinear": RESAMPLE_BILINEAR,
     "cubic": RESAMPLE_CUBIC,
-    "cubicspline": RESAMPLE_CUBIC,
     "lanczos": RESAMPLE_LANCZOS,
-    "antialias": RESAMPLE_LANCZOS,
     "average": RESAMPLE_AVERAGE,
     "mode": RESAMPLE_MODE,
     "box": RESAMPLE_AVERAGE,
@@ -39,14 +38,11 @@ PIL_RESAMPLING = {
     RESAMPLE_CUBIC: Image.Resampling.BICUBIC,
     RESAMPLE_LANCZOS: Image.Resampling.LANCZOS,
     RESAMPLE_AVERAGE: Image.Resampling.BOX,
-    RESAMPLE_MODE: Image.Resampling.NEAREST,
 }
 
 _CV2_INTER = None if cv2 is None else {
     RESAMPLE_NEAREST: cv2.INTER_NEAREST,
-    RESAMPLE_MODE: cv2.INTER_NEAREST,
     RESAMPLE_BILINEAR: cv2.INTER_LINEAR,
-    RESAMPLE_AVERAGE: cv2.INTER_LINEAR,
     RESAMPLE_CUBIC: cv2.INTER_CUBIC,
     RESAMPLE_LANCZOS: cv2.INTER_LANCZOS4,
 }
@@ -54,9 +50,14 @@ _CV2_INTER = None if cv2 is None else {
 
 def normalize_resampling(method: str | ResamplingMethod) -> str:
     key = method.value if isinstance(method, ResamplingMethod) else str(method)
-    mapped = _METHOD_ALIASES.get(key.lower())
+    lower = key.lower()
+    if lower == "cubicspline":
+        raise ValueError("cubicspline is not cubic convolution; this engine does not implement it")
+    if lower == "antialias":
+        raise ValueError("antialias is not lanczos; this engine does not implement it")
+    mapped = _METHOD_ALIASES.get(lower)
     if mapped is None:
-        return RESAMPLE_BILINEAR
+        raise ValueError(f"unsupported resampling method: {key}")
     return mapped
 
 
@@ -64,7 +65,7 @@ def to_uint8(array: np.ndarray) -> np.ndarray:
     if array.dtype == np.uint8:
         return array
     if np.issubdtype(array.dtype, np.floating):
-        scale = 255.0 if float(np.nanmax(array) if array.size else 0.0) <= 1.0001 else 1.0
+        scale = 255.0 if float(np.nanmax(array) if array.size else 0.0) <= 1.0 else 1.0
         return np.clip(np.rint(array * scale), 0, 255).astype(np.uint8)
     if array.dtype == np.uint16:
         return (array / 257).astype(np.uint8)
@@ -104,15 +105,24 @@ def resize_array(array: np.ndarray, out_h: int, out_w: int, method: str) -> np.n
         down = out_h < hwc.shape[0] or out_w < hwc.shape[1]
         if down and kind in {RESAMPLE_AVERAGE, RESAMPLE_BILINEAR}:
             interp = cv2.INTER_AREA
+        elif kind in _CV2_INTER:
+            interp = _CV2_INTER[kind]
         else:
-            interp = _CV2_INTER.get(kind, cv2.INTER_LINEAR)
+            interp = None
+        if interp is None:
+            image = array_to_image(src)
+            if kind not in PIL_RESAMPLING:
+                raise ValueError(f"unsupported resampling method: {kind}")
+            resized = image.resize((out_w, out_h), PIL_RESAMPLING[kind])
+            return image_to_array(resized)
         if hwc.shape[2] == 1:
             out = cv2.resize(hwc[:, :, 0], (out_w, out_h), interpolation=interp)
             return out if src.ndim == 2 else out[:, :, np.newaxis]
         return cv2.resize(hwc, (out_w, out_h), interpolation=interp)
     image = array_to_image(src)
-    resample = PIL_RESAMPLING.get(kind, Image.Resampling.BILINEAR)
-    resized = image.resize((out_w, out_h), resample)
+    if kind not in PIL_RESAMPLING:
+        raise ValueError(f"unsupported resampling method: {kind}")
+    resized = image.resize((out_w, out_h), PIL_RESAMPLING[kind])
     return image_to_array(resized)
 
 
@@ -226,20 +236,22 @@ def sample_lanczos(src: np.ndarray, rows: np.ndarray, cols: np.ndarray) -> np.nd
             weight = (wr * wc)[..., np.newaxis]
             acc += src[ri, ci] * weight
             wsum += weight
-    acc = np.divide(acc, np.maximum(wsum, 1e-6))
+    acc = np.divide(acc, wsum, out=np.zeros_like(acc), where=wsum > 0)
     acc[~valid] = 0
     return acc
 
 
 def sample_image(src: np.ndarray, rows: np.ndarray, cols: np.ndarray, method: str) -> np.ndarray:
     kind = normalize_resampling(method)
-    if kind == RESAMPLE_NEAREST or kind == RESAMPLE_MODE:
+    if kind == RESAMPLE_NEAREST:
         return sample_nearest(src, rows, cols)
     if kind == RESAMPLE_CUBIC:
         return sample_bicubic(src, rows, cols)
     if kind == RESAMPLE_LANCZOS:
         return sample_lanczos(src, rows, cols)
-    return sample_bilinear(src, rows, cols)
+    if kind == RESAMPLE_BILINEAR:
+        return sample_bilinear(src, rows, cols)
+    raise ValueError(f"resampling {kind!r} is not implemented for inverse-map sampling")
 
 
 def upsample2d(array: np.ndarray, out_h: int, out_w: int) -> np.ndarray:
@@ -262,10 +274,10 @@ def remap_array(src: np.ndarray, map_x: np.ndarray, map_y: np.ndarray, method: s
     map_x32 = np.ascontiguousarray(map_x.astype(np.float32, copy=False))
     map_y32 = np.ascontiguousarray(map_y.astype(np.float32, copy=False))
     kind = normalize_resampling(method)
-    if cv2 is not None and _CV2_INTER is not None and np.isfinite(src_f).all():
+    if cv2 is not None and _CV2_INTER is not None and kind in _CV2_INTER and np.isfinite(src_f).all():
         map_x_cv = map_x32 - 0.5
         map_y_cv = map_y32 - 0.5
-        interp = _CV2_INTER.get(kind, cv2.INTER_LINEAR)
+        interp = _CV2_INTER[kind]
         if src_f.shape[2] == 1:
             out = cv2.remap(
                 src_f[:, :, 0],
@@ -350,12 +362,12 @@ def remap_image(src: np.ndarray, map_x: np.ndarray, map_y: np.ndarray, method: s
     map_x32 = np.ascontiguousarray(map_x.astype(np.float32, copy=False))
     map_y32 = np.ascontiguousarray(map_y.astype(np.float32, copy=False))
     kind = normalize_resampling(method)
-    if cv2 is not None and _CV2_INTER is not None:
+    if cv2 is not None and _CV2_INTER is not None and kind in _CV2_INTER:
         # OpenCV treats (0, 0) as the center of the first pixel; our maps use PixelIsArea
         # coordinates where (0, 0) is the upper-left corner.
         map_x32 = map_x32 - 0.5
         map_y32 = map_y32 - 0.5
-        interp = _CV2_INTER.get(kind, cv2.INTER_LINEAR)
+        interp = _CV2_INTER[kind]
         if src_u8.shape[2] == 1:
             out = cv2.remap(
                 src_u8[:, :, 0],

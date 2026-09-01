@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 from pyproj import CRS
 
 from app.services.raster.affine import Affine
@@ -150,17 +151,30 @@ def test_nodata_mask_treats_nan_as_invalid():
 def test_utm_bounds_sampling_is_cheap_and_covers_corners():
     import time
 
-    from app.services.raster.crsutil import transform_bounds, transform_ring, transform_xy, make_transformer
+    from app.services.raster.crsutil import (
+        dest_sample_tolerance,
+        destination_pixel_size,
+        make_transformer,
+        transform_bounds,
+        transform_ring,
+        transform_xy,
+    )
 
     utm = CRS.from_epsg(32650)
     wgs84 = CRS.from_epsg(4326)
     bounds = (350000.0, 3388560.0, 411440.0, 3450000.0)
+    affine = Affine.north_up(bounds[0], bounds[3], 30.0, 30.0)
+    width = int(round((bounds[2] - bounds[0]) / 30.0))
+    height = int(round((bounds[3] - bounds[1]) / 30.0))
+    px, py = destination_pixel_size(utm, wgs84, affine, width, height)
+    dest_abs_tol = dest_sample_tolerance(px, py)
     started = time.perf_counter()
-    left, bottom, right, top = transform_bounds(utm, wgs84, bounds)
+    left, bottom, right, top = transform_bounds(utm, wgs84, bounds, dest_abs_tol=dest_abs_tol)
     elapsed = time.perf_counter() - started
     assert elapsed < 0.2
-    ring = transform_ring(utm, wgs84, bounds)
-    assert 4 < len(ring) < 200
+    ring = transform_ring(utm, wgs84, bounds, dest_abs_tol=dest_abs_tol)
+    assert ring[0] == ring[-1]
+    assert len(ring) >= 5
 
     transformer = make_transformer(utm, wgs84)
     corners_x = np.array([bounds[0], bounds[2], bounds[2], bounds[0]], dtype=np.float64)
@@ -170,3 +184,65 @@ def test_utm_bounds_sampling_is_cheap_and_covers_corners():
     assert right >= float(cx.max()) - 1e-9
     assert bottom <= float(cy.min()) + 1e-9
     assert top >= float(cy.max()) - 1e-9
+
+
+def test_bounds_densify_requires_dest_abs_tol():
+    from app.services.raster.crsutil import transform_bounds
+    from app.services.raster.errors import RasterError
+
+    utm = CRS.from_epsg(32650)
+    wgs84 = CRS.from_epsg(4326)
+    bounds = (350000.0, 3388560.0, 411440.0, 3450000.0)
+    with pytest.raises(RasterError, match="dest_abs_tol is required"):
+        transform_bounds(utm, wgs84, bounds)
+
+
+def test_bounds_densify_point_count_follows_dest_tolerance():
+    from app.services.raster.crsutil import transform_ring
+
+    utm = CRS.from_epsg(32650)
+    wgs84 = CRS.from_epsg(4326)
+    bounds = (350000.0, 3388560.0, 411440.0, 3450000.0)
+    coarse = transform_ring(utm, wgs84, bounds, dest_abs_tol=1.0)
+    fine = transform_ring(utm, wgs84, bounds, dest_abs_tol=1e-5)
+    assert len(fine) > len(coarse)
+
+
+def test_mercator_bounds_use_four_corners_only():
+    from app.services.raster.crsutil import transform_bounds, transform_ring
+
+    bounds = (116.0, 39.0, 117.0, 40.0)
+    ring = transform_ring(CRS.from_epsg(4326), CRS.from_epsg(3857), bounds)
+    assert len(ring) == 5
+    left, bottom, right, top = transform_bounds(CRS.from_epsg(4326), CRS.from_epsg(3857), bounds)
+    assert right > left and top > bottom
+
+
+def test_unknown_resampling_is_rejected():
+    from app.services.raster.resample import normalize_resampling
+
+    with pytest.raises(ValueError, match="unsupported resampling method"):
+        normalize_resampling("not-a-kernel")
+
+
+def test_cubicspline_is_not_aliased_to_cubic():
+    from app.services.raster.resample import normalize_resampling
+
+    with pytest.raises(ValueError, match="cubicspline is not cubic convolution"):
+        normalize_resampling("cubicspline")
+
+
+def test_geotiff_write_preserves_nonzero_shear(tmp_path: Path):
+    affine = Affine(a=1.0, b=1e-13, c=0.0, d=0.0, e=-1.0, f=10.0)
+    assert not affine.is_north_up()
+    path = tmp_path / "shear.tif"
+    write_geotiff_array(
+        path,
+        np.zeros((4, 4), dtype=np.float32),
+        affine=affine,
+        crs=CRS.from_epsg(4326),
+        block_size=16,
+    )
+    with GeoTiffReader(path) as src:
+        assert src.affine.b == pytest.approx(1e-13)
+        assert not src.affine.is_north_up()
