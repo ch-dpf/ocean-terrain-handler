@@ -16,9 +16,10 @@ WGS84_A = 6378137.0
 EARTH_HALF = WGS84_A * math.pi
 WEB_MERCATOR_MAX_LAT = math.degrees(math.atan(math.sinh(math.pi)))
 
-# Chord-error stop for adaptive boundary transform (relative to dest-space edge length).
-_CHORD_REL_TOL = 1e-12
-_MAX_EDGE_DEPTH = 16
+# Samples per rectangle edge when densifying projected bounds (including endpoints).
+# 1e-12 chord refine used to explode to 2^16 points/edge; DEM grid sizing does not
+# need that. 21 samples (~5% of edge) is enough for UTM/TM AOIs of typical DEMs.
+_EDGE_SAMPLES = 21
 
 
 def parse_crs(value: str | CRS) -> CRS:
@@ -63,58 +64,45 @@ def transform_xy(
     return out_x, out_y
 
 
-def _finite_pair(x: float, y: float) -> bool:
-    return math.isfinite(x) and math.isfinite(y)
-
-
-def _transform_point(transformer: Transformer, x: float, y: float) -> tuple[float, float]:
-    tx, ty = transform_xy(transformer, np.array([x], dtype=np.float64), np.array([y], dtype=np.float64))
-    return float(tx[0]), float(ty[0])
-
-
-def _axis_aligned_corners(
+def _rect_edge_xy(
     left: float,
     bottom: float,
     right: float,
     top: float,
-) -> list[tuple[float, float]]:
-    return [(left, bottom), (right, bottom), (right, top), (left, top)]
+    samples: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Coordinates along the four edges of an axis-aligned rectangle (duplicates at corners)."""
+    count = max(2, int(samples))
+    t = np.linspace(0.0, 1.0, count, dtype=np.float64)
+    xs = np.concatenate(
+        [
+            left + t * (right - left),
+            np.full(count, right, dtype=np.float64),
+            right + t * (left - right),
+            np.full(count, left, dtype=np.float64),
+        ]
+    )
+    ys = np.concatenate(
+        [
+            np.full(count, bottom, dtype=np.float64),
+            bottom + t * (top - bottom),
+            np.full(count, top, dtype=np.float64),
+            top + t * (bottom - top),
+        ]
+    )
+    return xs, ys
 
 
-def _refine_edge(
-    transformer: Transformer,
-    x0: float,
-    y0: float,
-    x1: float,
-    y1: float,
-    depth: int,
-) -> list[tuple[float, float]]:
-    """Split an edge until the dest-space midpoint lies on the chord, up to a numeric bound."""
-    t0 = _transform_point(transformer, x0, y0)
-    t1 = _transform_point(transformer, x1, y1)
-    mx = (x0 + x1) * 0.5
-    my = (y0 + y1) * 0.5
-    tm = _transform_point(transformer, mx, my)
-    if not (_finite_pair(*t0) and _finite_pair(*t1) and _finite_pair(*tm)):
-        return [t0, t1]
-    chord_x = (t0[0] + t1[0]) * 0.5
-    chord_y = (t0[1] + t1[1]) * 0.5
-    dist = math.hypot(tm[0] - chord_x, tm[1] - chord_y)
-    span = math.hypot(t1[0] - t0[0], t1[1] - t0[1])
-    if depth >= _MAX_EDGE_DEPTH or dist <= _CHORD_REL_TOL * max(span, 1.0):
-        return [t0, t1]
-    left_pts = _refine_edge(transformer, x0, y0, mx, my, depth + 1)
-    right_pts = _refine_edge(transformer, mx, my, x1, y1, depth + 1)
-    return left_pts[:-1] + right_pts
-
-
-def _aabb_from_points(points: list[tuple[float, float]]) -> tuple[float, float, float, float]:
-    finite = [(x, y) for x, y in points if _finite_pair(x, y)]
-    if not finite:
+def _aabb_from_xy(xs: np.ndarray, ys: np.ndarray) -> tuple[float, float, float, float]:
+    finite = np.isfinite(xs) & np.isfinite(ys)
+    if not np.any(finite):
         raise RasterError("Failed to transform raster bounds between CRS")
-    xs = [p[0] for p in finite]
-    ys = [p[1] for p in finite]
-    return min(xs), min(ys), max(xs), max(ys)
+    return (
+        float(np.min(xs[finite])),
+        float(np.min(ys[finite])),
+        float(np.max(xs[finite])),
+        float(np.max(ys[finite])),
+    )
 
 
 def _mercator_pair(source: CRS, target: CRS) -> bool:
@@ -131,27 +119,18 @@ def transform_bounds(
 
     Axis-aligned rectangles in EPSG:4326 or EPSG:3857 map to each other with
     extrema at the four corners (x is linear in longitude, y is monotonic in
-    latitude). Other CRS pairs refine each edge until the dest-space chord error
-    is within floating-point tolerance.
+    latitude). Other CRS pairs sample each edge a fixed number of times.
     """
     left, bottom, right, top = bounds
     if crs_equal(source, target):
         return left, bottom, right, top
     transformer = make_transformer(source, target)
-    corners = _axis_aligned_corners(left, bottom, right, top)
     if _mercator_pair(source, target):
-        points = [_transform_point(transformer, x, y) for x, y in corners]
-        return _aabb_from_points(points)
-
-    points: list[tuple[float, float]] = []
-    closed = corners + [corners[0]]
-    for (x0, y0), (x1, y1) in zip(closed, closed[1:]):
-        edge = _refine_edge(transformer, x0, y0, x1, y1, 0)
-        if points:
-            points.extend(edge[1:])
-        else:
-            points.extend(edge)
-    return _aabb_from_points(points)
+        xs, ys = _rect_edge_xy(left, bottom, right, top, 2)
+    else:
+        xs, ys = _rect_edge_xy(left, bottom, right, top, _EDGE_SAMPLES)
+    tx, ty = transform_xy(transformer, xs, ys)
+    return _aabb_from_xy(tx, ty)
 
 
 def transform_ring(
@@ -162,22 +141,12 @@ def transform_ring(
     """Closed boundary ring in ``target`` CRS."""
     left, bottom, right, top = bounds
     if crs_equal(source, target):
-        ring = [[left, bottom], [right, bottom], [right, top], [left, top], [left, bottom]]
-        return ring
+        return [[left, bottom], [right, bottom], [right, top], [left, top], [left, bottom]]
     transformer = make_transformer(source, target)
-    corners = _axis_aligned_corners(left, bottom, right, top)
-    closed = corners + [corners[0]]
-    if _mercator_pair(source, target):
-        points = [_transform_point(transformer, x, y) for x, y in closed]
-    else:
-        points = []
-        for (x0, y0), (x1, y1) in zip(closed, closed[1:]):
-            edge = _refine_edge(transformer, x0, y0, x1, y1, 0)
-            if points:
-                points.extend(edge[1:])
-            else:
-                points.extend(edge)
-    ring = [[x, y] for x, y in points if _finite_pair(x, y)]
+    samples = 2 if _mercator_pair(source, target) else _EDGE_SAMPLES
+    xs, ys = _rect_edge_xy(left, bottom, right, top, samples)
+    tx, ty = transform_xy(transformer, xs, ys)
+    ring = [[float(x), float(y)] for x, y in zip(tx, ty) if math.isfinite(x) and math.isfinite(y)]
     if ring and ring[0] != ring[-1]:
         ring.append(ring[0])
     return ring

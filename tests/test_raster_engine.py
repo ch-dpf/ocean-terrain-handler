@@ -145,3 +145,28 @@ def test_nodata_mask_treats_nan_as_invalid():
     array = np.array([[1.0, np.nan], [2.0, 3.0]], dtype=np.float32)
     mask = nodata_mask(array, None)
     assert mask.tolist() == [[False, True], [False, False]]
+
+
+def test_utm_bounds_sampling_is_cheap_and_covers_corners():
+    import time
+
+    from app.services.raster.crsutil import transform_bounds, transform_ring, transform_xy, make_transformer
+
+    utm = CRS.from_epsg(32650)
+    wgs84 = CRS.from_epsg(4326)
+    bounds = (350000.0, 3388560.0, 411440.0, 3450000.0)
+    started = time.perf_counter()
+    left, bottom, right, top = transform_bounds(utm, wgs84, bounds)
+    elapsed = time.perf_counter() - started
+    assert elapsed < 0.2
+    ring = transform_ring(utm, wgs84, bounds)
+    assert 4 < len(ring) < 200
+
+    transformer = make_transformer(utm, wgs84)
+    corners_x = np.array([bounds[0], bounds[2], bounds[2], bounds[0]], dtype=np.float64)
+    corners_y = np.array([bounds[1], bounds[1], bounds[3], bounds[3]], dtype=np.float64)
+    cx, cy = transform_xy(transformer, corners_x, corners_y)
+    assert left <= float(cx.min()) + 1e-9
+    assert right >= float(cx.max()) - 1e-9
+    assert bottom <= float(cy.min()) + 1e-9
+    assert top >= float(cy.max()) - 1e-9

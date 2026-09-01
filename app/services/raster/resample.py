@@ -310,14 +310,16 @@ def average_downsample(
     copy_w = min(src_w, padded.shape[1])
     padded[:copy_h, :copy_w] = src[:copy_h, :copy_w]
     blocks = padded.reshape(out_h, factor_y, out_w, factor_x, samples)
-    with np.errstate(all="ignore"):
-        out = np.nanmean(blocks, axis=(1, 3))
+    valid = np.isfinite(blocks)
+    counts = valid.sum(axis=(1, 3), dtype=np.float32)
+    sums = np.where(valid, blocks, 0.0).sum(axis=(1, 3), dtype=np.float32)
     fill = (
         np.float32("nan")
         if nodata is None or (isinstance(nodata, float) and np.isnan(nodata))
         else np.float32(nodata)
     )
-    out[np.isnan(out)] = fill
+    out = np.full(counts.shape, fill, dtype=np.float32)
+    np.divide(sums, counts, out=out, where=counts > 0)
     return out
 
 

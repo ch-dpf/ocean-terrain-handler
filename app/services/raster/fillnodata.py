@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
-from app.services.raster.geotiff import GeoTiffReader, write_geotiff_tiled
+from app.services.raster.geotiff import GeoTiffReader, write_geotiff_array, write_geotiff_tiled
 from app.services.raster.nodata import nodata_mask
 from app.services.raster.resample import cast_sampled
 
@@ -29,39 +29,35 @@ def _scan_neighbors(
     reverse: bool,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Nearest valid pixel along one axis; returns (distance, value)."""
-    if axis == 1:
-        height, width = values.shape
-        dist = np.full((height, width), np.inf, dtype=np.float64)
-        val = np.zeros((height, width), dtype=np.float64)
-        last_idx = np.full(height, -1, dtype=np.int32)
-        last_val = np.zeros(height, dtype=np.float64)
-        cols = range(width - 1, -1, -1) if reverse else range(width)
-        for col in cols:
-            valid = ~invalid[:, col]
-            last_idx = np.where(valid, col, last_idx)
-            last_val = np.where(valid, values[:, col], last_val)
-            step = np.abs(col - last_idx).astype(np.float64)
-            present = last_idx >= 0
-            dist[:, col] = np.where(present, step, np.inf)
-            val[:, col] = last_val
+    if reverse:
+        values_w = np.flip(values, axis=axis)
+        invalid_w = np.flip(invalid, axis=axis)
     else:
-        height, width = values.shape
-        dist = np.full((height, width), np.inf, dtype=np.float64)
-        val = np.zeros((height, width), dtype=np.float64)
-        last_idx = np.full(width, -1, dtype=np.int32)
-        last_val = np.zeros(width, dtype=np.float64)
-        rows = range(height - 1, -1, -1) if reverse else range(height)
-        for row in rows:
-            valid = ~invalid[row, :]
-            last_idx = np.where(valid, row, last_idx)
-            last_val = np.where(valid, values[row, :], last_val)
-            step = np.abs(row - last_idx).astype(np.float64)
-            present = last_idx >= 0
-            dist[row, :] = np.where(present, step, np.inf)
-            val[row, :] = last_val
+        values_w = values
+        invalid_w = invalid
+
+    length = values_w.shape[axis]
+    positions = np.arange(length, dtype=np.int32)
+    if axis == 1:
+        valid_pos = np.where(~invalid_w, positions[None, :], np.int32(-1))
+        last_idx = np.maximum.accumulate(valid_pos, axis=1)
+        rows = np.arange(values_w.shape[0])[:, None]
+        last_val = values_w[rows, np.clip(last_idx, 0, length - 1)]
+        dist = positions[None, :].astype(np.float64) - last_idx.astype(np.float64)
+    else:
+        valid_pos = np.where(~invalid_w, positions[:, None], np.int32(-1))
+        last_idx = np.maximum.accumulate(valid_pos, axis=0)
+        cols = np.arange(values_w.shape[1])[None, :]
+        last_val = values_w[np.clip(last_idx, 0, length - 1), cols]
+        dist = positions[:, None].astype(np.float64) - last_idx.astype(np.float64)
+
+    dist = np.where(last_idx >= 0, dist, np.inf)
     dist[dist > max_distance] = np.inf
     dist[dist <= 0] = np.inf
-    return dist, val
+    if reverse:
+        dist = np.flip(dist, axis=axis)
+        last_val = np.flip(last_val, axis=axis)
+    return dist, last_val
 
 
 def fill_nodata_array(
@@ -118,6 +114,23 @@ def fill_nodata_geotiff(
     pad = max(1, int(max_distance))
     with GeoTiffReader(input_path, cache_bytes=cache_bytes) as src:
         effective_nodata = src.nodata if nodata is None else nodata
+        working_bytes = int(src.height) * int(src.width) * 8
+        if working_bytes <= cache_bytes:
+            data = src.read_window(0, 0, src.height, src.width)[:, :, 0]
+            filled = fill_nodata_array(data, nodata=effective_nodata, max_distance=pad)
+            typed = cast_sampled(filled[:, :, np.newaxis].astype(np.float32, copy=False), src.dtype, nodata=effective_nodata)
+            write_geotiff_array(
+                output_path,
+                typed,
+                affine=src.affine,
+                crs=src.crs,
+                compress=compress,
+                block_size=block_size,
+                nodata=effective_nodata,
+            )
+            if on_progress is not None:
+                on_progress(100.0, "fill-nodata complete")
+            return
         tile = block_size
         n_ty = (src.height + tile - 1) // tile
         n_tx = (src.width + tile - 1) // tile

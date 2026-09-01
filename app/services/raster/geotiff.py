@@ -256,7 +256,13 @@ def _crs_from_geotiff_tags(tags: dict) -> CRS:
 class GeoTiffReader:
     """Windowed reader for a georeferenced TIFF."""
 
-    def __init__(self, path: Path | str, cache_bytes: int = 512 * 1024 * 1024) -> None:
+    def __init__(
+        self,
+        path: Path | str,
+        cache_bytes: int = 512 * 1024 * 1024,
+        *,
+        preload: bool | None = None,
+    ) -> None:
         self.path = Path(path)
         if not self.path.is_file():
             raise RasterError(f"Raster not found: {self.path}")
@@ -284,7 +290,10 @@ class GeoTiffReader:
             self._cache = _TileCache(cache_bytes)
             self._full: np.ndarray | None = None
             uncompressed = int(self.width) * int(self.height) * int(self.samples) * int(self.dtype.itemsize)
-            if uncompressed <= min(cache_bytes, _FULL_LOAD_MAX_BYTES):
+            load_full = uncompressed <= min(cache_bytes, _FULL_LOAD_MAX_BYTES)
+            if preload is False:
+                load_full = False
+            if load_full:
                 try:
                     array = self._page.asarray()
                     self._full = _normalize_hwc(array, self.samples)
