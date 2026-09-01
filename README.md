@@ -153,7 +153,7 @@ curl http://localhost:8000/api/v1/terrain/jobs/{job_id}
 
 任务状态：`queued` → `preprocessing` → `tiling` → `publishing` → `completed` / `failed`
 
-查询响应含量化进度字段 `progress`（`percent` 0–100、`phase`、`message`，切片阶段可含 zoom），以及处理耗时字段 `created_at` / `completed_at` / `elapsed_seconds`。
+查询响应含量化进度字段 `progress`（`percent` 为已写入/计划的未压缩栅格字节比，0–100；另含 `bytes_done` / `bytes_planned`、`phase`、`message`，切片阶段可含 zoom），以及处理耗时字段 `created_at` / `completed_at` / `elapsed_seconds`。
 
 若 Redis 中的任务记录已按 `JOB_TTL` 过期，查询会回退读取磁盘上的 `jobs/{job_id}/manifest.json`（无 manifest 时若已有 `tiles/` 产物则按已完成快照返回）。WebSocket 在仅磁盘快照可用时发送一次终态/静态快照后关闭。
 

@@ -139,12 +139,14 @@ class JobProgress(BaseModel):
     min_zoom: int | None = Field(default=None, description="输出最小缩放级别")
     max_zoom: int | None = Field(default=None, description="输出最大缩放级别")
     weight_source: str | None = Field(
-        default=None,
-        description="阶段权重来源：default（固定）或 historical（历史校准）",
+        default="bytes",
+        description="进度计量：已写入/计划的未压缩栅格字节数",
     )
+    bytes_done: int | None = Field(default=None, ge=0, description="已完成的未压缩栅格字节数")
+    bytes_planned: int | None = Field(default=None, ge=0, description="任务计划中的未压缩栅格字节数")
     calibration_samples: int | None = Field(
         default=None,
-        description="历史校准时使用的已完成任务数量（如适用）",
+        description="兼容字段；字节进度不使用历史校准",
     )
 
 

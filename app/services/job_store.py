@@ -42,6 +42,9 @@ class JobStore:
                 "current_zoom": None,
                 "min_zoom": None,
                 "max_zoom": None,
+                "weight_source": "bytes",
+                "bytes_done": 0,
+                "bytes_planned": 0,
             },
             **payload,
         }
@@ -65,5 +68,5 @@ class JobStore:
 
     @property
     def redis(self):
-        """Expose Redis client for auxiliary stores (e.g. progress calibration)."""
+        """Expose Redis client for pub/sub."""
         return self._redis

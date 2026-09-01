@@ -3,7 +3,6 @@
 import subprocess
 import sys
 import time
-
 from datetime import UTC, datetime
 
 from app.schemas import JobProgress
@@ -12,13 +11,11 @@ from app.services.job_progress import (
     ThrottledProgressWriter,
     compute_elapsed_seconds,
     gdal_progress_flag_unsupported,
-    map_subprogress,
     parse_gdal_progress_chunk,
     parse_zoom_level,
     progress_to_store_fields,
     run_gdal_command,
 )
-from app.services.progress_calibration import build_stage_ranges
 
 
 def test_parse_gdal_dot_progress():
@@ -42,39 +39,23 @@ def test_parse_zoom_level():
     assert parse_zoom_level("no zoom here") is None
 
 
-def test_map_subprogress_within_stage():
-    default_ranges = {
-        "gdal_preprocess": (2.0, 25.0),
-        "ctb_tile": (25.0, 95.0),
-    }
-    assert map_subprogress("gdal_preprocess", 0.0, default_ranges) == 2.0
-    assert map_subprogress("gdal_preprocess", 100.0, default_ranges) == 25.0
-    assert map_subprogress("ctb_tile", 50.0, default_ranges) == 60.0
-
-
-def test_map_subprogress_with_calibrated_ranges():
-    calibrated = build_stage_ranges(
-        {
-            "initializing": 0.01,
-            "gdal_preprocess": 0.09,
-            "ctb_tile": 0.85,
-            "register_tileset": 0.05,
-        }
-    )
-    assert map_subprogress("ctb_tile", 50.0, calibrated) == 52.5
-
-
-def test_tracker_monotonic_subprogress():
-    tracker = JobProgressTracker(stage="ctb_tile", min_zoom=0, max_zoom=10)
-    first = tracker.update_subprogress(10.0, message="Starting")
-    second = tracker.update_subprogress(5.0, message="Should not regress")
+def test_tracker_monotonic_bytes():
+    tracker = JobProgressTracker(stage="ctb_tile", bytes_planned=1000)
+    first = tracker.set_bytes_done(100, message="Starting")
+    second = tracker.set_bytes_done(50, message="Should not regress")
     assert second.percent >= first.percent
+    assert second.bytes_done == 100
 
 
-def test_tracker_zoom_assists_subprogress():
-    tracker = JobProgressTracker(stage="ctb_tile", min_zoom=0, max_zoom=10)
-    progress = tracker.update_subprogress(0.0, current_zoom=5)
-    assert progress.percent > 25.0
+def test_tracker_zoom_does_not_invent_percent():
+    tracker = JobProgressTracker(
+        stage="ctb_tile",
+        bytes_planned=1000,
+        min_zoom=0,
+        max_zoom=10,
+    )
+    progress = tracker.set_bytes_done(0, current_zoom=5)
+    assert progress.percent == 0.0
     assert progress.current_zoom == 5
 
 
@@ -99,21 +80,17 @@ def test_gdal_progress_flag_unsupported():
     assert gdal_progress_flag_unsupported("gdalwarp failed: out of memory") is False
 
 
-def test_tracker_exposes_weight_source():
+def test_tracker_exposes_byte_progress():
     tracker = JobProgressTracker(
         stage="gdal_preprocess",
-        stage_ranges={
-            "gdal_preprocess": (0.0, 10.0),
-            "done": (100.0, 100.0),
-            "failed": (0.0, 100.0),
-        },
-        weight_source="historical",
-        calibration_samples=12,
+        bytes_planned=200,
+        weight_source="bytes",
     )
-    progress = tracker.update_subprogress(50.0, message="Halfway")
-    assert progress.weight_source == "historical"
-    assert progress.calibration_samples == 12
-    assert progress.percent == 5.0
+    progress = tracker.set_bytes_done(50, message="Halfway")
+    assert progress.weight_source == "bytes"
+    assert progress.bytes_done == 50
+    assert progress.bytes_planned == 200
+    assert progress.percent == 25.0
 
 
 def test_progress_to_store_fields():

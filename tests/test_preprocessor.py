@@ -9,6 +9,7 @@ from app.schemas import PreprocessOptions
 from app.services.preprocessor import PreprocessError, gdal_info, preprocess_dem
 from app.services.raster.geotiff import GeoTiffReader
 from app.services.raster.nodata import nodata_mask
+from app.services.byte_progress import overview_bytes, raster_bytes
 from tests.raster_fixtures import write_dem_geotiff_4326
 
 
@@ -52,6 +53,19 @@ def test_preprocess_reprojects_fills_and_adds_overviews(tmp_path: Path):
     assert Path(str(output) + ".ovr").is_file()
     assert events
     assert events[-1][0] == 100.0
+
+    with GeoTiffReader(output) as dst:
+        itemsize = int(dst.dtype.itemsize)
+        reproject_b = raster_bytes(dst.width, dst.height, 1, itemsize)
+        fill_b = reproject_b
+        overview_b = overview_bytes(dst.width, dst.height, 1, itemsize)
+        preprocess_b = reproject_b + fill_b + overview_b
+    after_reproject = [pct for pct, msg in events if msg and "reproject" in msg]
+    assert after_reproject
+    assert after_reproject[-1] == pytest.approx(100.0 * reproject_b / preprocess_b)
+    after_fill = [pct for pct, msg in events if msg and "fill-nodata" in msg]
+    assert after_fill
+    assert after_fill[-1] == pytest.approx(100.0 * (reproject_b + fill_b) / preprocess_b)
 
     with GeoTiffReader(output) as dst:
         assert dst.crs.to_epsg() == 4326
