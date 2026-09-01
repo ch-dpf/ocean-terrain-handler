@@ -73,8 +73,16 @@ class CtbOptions(BaseModel):
     start_zoom: int | None = Field(default=None, ge=0, description="起始缩放级别")
     end_zoom: int | None = Field(default=0, ge=0, description="结束缩放级别")
     resampling_method: ResamplingMethod = ResamplingMethod.AVERAGE
-    error_threshold: float = Field(default=0.125, gt=0, description="误差阈值")
-    warp_memory: int | None = Field(default=None, ge=0, description="重投影缓存字节数")
+    error_threshold: float = Field(
+        default=0.125,
+        gt=0,
+        description="CTB/GDAL 近似变换误差（像素）；Python warp 为精确反算，该字段仅保留选项兼容",
+    )
+    warp_memory: int | None = Field(
+        default=None,
+        ge=0,
+        description="CTB/GDAL warp 内存上限（字节）；Python 切片忽略",
+    )
     resume: bool = Field(default=False, description="断点续跑")
     mesh_qfactor: float = Field(default=1.0, gt=0, description="网格质量因子")
     layer_only: bool = Field(default=False, description="仅输出 layer.json")
