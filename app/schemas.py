@@ -44,14 +44,14 @@ class Profile(str, Enum):
 class PreprocessOptions(BaseModel):
     """预处理选项。"""
 
-    target_crs: str = Field(default="EPSG:4326", description="GDAL 重投影目标坐标系")
+    target_crs: str = Field(default="EPSG:4326", description="重投影目标坐标系")
     fill_nodata: bool = Field(default=True, description="切片前填充 NODATA")
-    build_overviews: bool = Field(default=True, description="使用 GDAL 构建概览图")
+    build_overviews: bool = Field(default=True, description="构建 GeoTIFF 低分辨率概览图（overview）")
     # GeoTIFF TileWidth/TileHeight must be multiples of 16 (not CTB's 65px mesh size).
     block_size: int = Field(
         default=256,
         ge=16,
-        description="GDAL TIFF BLOCKXSIZE/BLOCKYSIZE；须为 16 的倍数",
+        description="TIFF BLOCKXSIZE/BLOCKYSIZE；须为 16 的倍数",
     )
     nodata_value: float | None = Field(default=None, description="覆盖 NODATA 值")
 
@@ -139,12 +139,14 @@ class JobProgress(BaseModel):
     min_zoom: int | None = Field(default=None, description="输出最小缩放级别")
     max_zoom: int | None = Field(default=None, description="输出最大缩放级别")
     weight_source: str | None = Field(
-        default=None,
-        description="阶段权重来源：default（固定）或 historical（历史校准）",
+        default="bytes",
+        description="进度计量：已写入/计划的未压缩栅格字节数",
     )
+    bytes_done: int | None = Field(default=None, ge=0, description="已完成的未压缩栅格字节数")
+    bytes_planned: int | None = Field(default=None, ge=0, description="任务计划中的未压缩栅格字节数")
     calibration_samples: int | None = Field(
         default=None,
-        description="历史校准时使用的已完成任务数量（如适用）",
+        description="兼容字段；字节进度不使用历史校准",
     )
 
 

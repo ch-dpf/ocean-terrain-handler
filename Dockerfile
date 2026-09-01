@@ -1,18 +1,17 @@
-FROM ghcr.io/osgeo/gdal:ubuntu-small-3.12.4
+FROM python:3.12-slim-bookworm
 
-# docker.io client talks to host Docker via mounted /var/run/docker.sock.
-# Do not install gdal-bin here; this image already ships GDAL 3.12.4.
+# docker.io talks to the host daemon via /var/run/docker.sock (CTB sidecar).
+# libgomp1/libglib are needed by opencv-python-headless.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3-venv \
     docker.io \
+    libgomp1 \
+    libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 COPY requirements.txt .
-RUN python3 -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip3 install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 COPY pyproject.toml .

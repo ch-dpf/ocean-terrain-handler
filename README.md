@@ -1,12 +1,12 @@
 # Ocean Terrain Handler
 
-通用地形 GeoTIFF 预处理与 Cesium 地形瓦片切片服务。基于 **FastAPI + Celery + Redis**，通过 Docker 调用本地自构建的 [cesium-terrain-builder](https://github.com/ahuarte47/cesium-terrain-builder)（`master-quantized-mesh` 分支）生成 Cesium 地形瓦片。
+通用地形 GeoTIFF 预处理与 Cesium 地形瓦片切片服务。基于 **FastAPI + Celery + Redis** 与自研 Python 栅格引擎（`tifffile` / `pyproj` / `numpy`），通过 Docker 调用本地自构建的 [cesium-terrain-builder](https://github.com/ahuarte47/cesium-terrain-builder)（`master-quantized-mesh` 分支）生成 Cesium 地形瓦片。
 
 ## 架构
 
 ```
 客户端 → FastAPI → Redis 队列 → Celery Worker
-                                    ├─ GDAL 预处理 (gdal raster reproject / fill-nodata / overview)
+                                    ├─ 自研 Python 栅格预处理 (reproject / fill-nodata / overview)
                                     ├─ ctb-tile (本地 Docker 镜像) → 瓦片输出
                                     └─ 注册 tileset → data/tilesets/terrain/
 
@@ -19,17 +19,17 @@
 | 组件 | 职责 |
 |------|------|
 | API | 接收任务、文件上传、查询状态、发布管理 |
-| Worker | GDAL 预处理 + 调用 CTB 切片 + 注册发布 |
+| Worker | Python 栅格预处理 + 调用 CTB 切片 + 注册发布 |
 | Redis | 任务队列与状态存储 |
 | terrain-server (nginx) | 地形瓦片 HTTP 发布 + Cesium 预览页 + API 反代 |
 | 工作目录 | 输入 DEM、中间产物、瓦片输出、发布注册 |
 
 ## 处理流程
 
-1. **校验** — `gdal raster info` 检查输入栅格
-2. **投影** — `gdal raster reproject` 转为 EPSG:4326（geodetic 推荐）
-3. **NODATA 填充** — `gdal raster fill-nodata`（CTB 不处理空值，必须预处理）
-4. **概览图** — `gdal raster overview add` 加速大文件切片
+1. **校验** — 读取 GeoTIFF 元数据，确认尺寸 / CRS / NODATA
+2. **投影** — 重投影为 EPSG:4326（geodetic 推荐）
+3. **NODATA 填充** — 四方向反距离加权填充（CTB 不处理空值，必须预处理）
+4. **概览图** — 构建 2/4/8/16 金字塔，加速大文件切片
 5. **切片** — `ctb-tile` 生成 `{z}/{x}/{y}.terrain`
 6. **发布** — 生成/校验 `layer.json`，注册到 `data/tilesets/terrain/{name}`，由 nginx 对外服务
 
@@ -153,7 +153,7 @@ curl http://localhost:8000/api/v1/terrain/jobs/{job_id}
 
 任务状态：`queued` → `preprocessing` → `tiling` → `publishing` → `completed` / `failed`
 
-查询响应含量化进度字段 `progress`（`percent` 0–100、`phase`、`message`，切片阶段可含 zoom），以及处理耗时字段 `created_at` / `completed_at` / `elapsed_seconds`。
+查询响应含量化进度字段 `progress`（`percent` 为已写入/计划的未压缩栅格字节比，0–100；另含 `bytes_done` / `bytes_planned`、`phase`、`message`，切片阶段可含 zoom），以及处理耗时字段 `created_at` / `completed_at` / `elapsed_seconds`。
 
 若 Redis 中的任务记录已按 `JOB_TTL` 过期，查询会回退读取磁盘上的 `jobs/{job_id}/manifest.json`（无 manifest 时若已有 `tiles/` 产物则按已完成快照返回）。WebSocket 在仅磁盘快照可用时发送一次终态/静态快照后关闭。
 
@@ -217,7 +217,7 @@ viewer.terrainProvider = await Cesium.CesiumTerrainProvider.fromUrl(
 | `target_crs` | string | `EPSG:4326` | 目标坐标系 |
 | `fill_nodata` | bool | `true` | 填充 NODATA |
 | `build_overviews` | bool | `true` | 构建概览图 |
-| `block_size` | int | `256` | GDAL TIFF 块大小（须为 16 的倍数；勿与 CTB 的 65 像素瓦片混淆） |
+| `block_size` | int | `256` | TIFF 块大小（须为 16 的倍数；勿与 CTB 的 65 像素瓦片混淆） |
 | `nodata_value` | float | — | 覆盖 NODATA 值 |
 
 ### CTB 切片 `ctb_options`
@@ -267,7 +267,7 @@ uvicorn app.main:app --reload --port 8000
 celery -A app.worker.celery_app worker --loglevel=info
 ```
 
-Worker 镜像基于 `ghcr.io/osgeo/gdal:ubuntu-small-3.12.4`（GDAL 3.12 统一 CLI）。本地开发需安装 GDAL ≥ 3.11，并确保 Docker 可执行且已构建 `cesium-terrain-builder:local` 镜像。
+Worker 镜像基于 `python:3.12-slim`，预处理为自研 Python 栅格引擎（`tifffile` / `pyproj` / `numpy`），不调用 GDAL 命令行。切片仍通过 Docker 调用 `cesium-terrain-builder:local`（CTB 进程内部会使用 libgdal）。本地开发需 Python 3.11+，并确保 Docker 可执行且已构建该 CTB 镜像。
 
 预览与瓦片发布需单独启动 nginx（或使用 `docker compose up terrain-server`）。
 
@@ -281,7 +281,8 @@ ocean-terrain-handler/
 │   ├── schemas.py           # 请求/响应模型
 │   ├── api/routes.py        # REST 路由
 │   ├── services/
-│   │   ├── preprocessor.py  # GDAL 预处理
+│   │   ├── preprocessor.py  # DEM 预处理
+│   │   ├── raster/          # 自研 GeoTIFF / warp / fill-nodata / overview
 │   │   ├── ctb_runner.py    # CTB Docker 调用
 │   │   ├── layer_json.py    # layer.json 生成
 │   │   ├── tile_publisher.py # 瓦片发布注册
@@ -307,7 +308,7 @@ ocean-terrain-handler/
 | `WORKSPACE_DOCKER_VOLUME` | `ocean-terrain-handler_workspace_data` | CTB 使用的 Docker 命名卷（Docker Desktop 推荐）；与 `HOST_WORKSPACE_DIR` 二选一 |
 | `HOST_WORKSPACE_DIR` | — | 宿主机 `./data` 绝对路径（仅 host-data 模式；Windows 例：`D:/workspace/ocean-terrain-handler/data`） |
 | `CTB_DOCKER_IMAGE` | `cesium-terrain-builder:local` | 本地自构建 CTB 镜像名 |
-| `GDAL_CACHEMAX` | `512` | GDAL 缓存 (MB) |
+| `GDAL_CACHEMAX` | `512` | 预处理瓦片缓存 (MB)；同时作为 CTB 容器的 `GDAL_CACHEMAX` |
 | `JOB_TTL` | `604800` | 任务状态保留 (秒) |
 | `TERRAIN_SERVER_PUBLIC_URL` | `http://localhost:8103` | terrain-server（nginx）对外 URL |
 | `TERRAIN_BASE_PATH` | `/tilesets` | 地形 URL 前缀 |

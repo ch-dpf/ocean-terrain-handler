@@ -1,87 +1,102 @@
-"""Tests for GDAL unified CLI command construction."""
+"""Python raster preprocess tests (no GDAL CLI)."""
 
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from app.schemas import PreprocessOptions
-from app.services.preprocessor import (
-    _fill_nodata_cmd,
-    _overview_add_cmd,
-    _reproject_cmd,
-)
+from app.services.preprocessor import PreprocessError, gdal_info, preprocess_dem
+from app.services.raster.geotiff import GeoTiffReader
+from app.services.raster.nodata import nodata_mask
+from app.services.byte_progress import overview_bytes, raster_bytes
+from tests.raster_fixtures import write_dem_geotiff_4326
 
 
-def test_reproject_cmd_defaults() -> None:
-    options = PreprocessOptions()
-    cmd = _reproject_cmd(Path("in.tif"), Path("out.tif"), options)
-
-    assert cmd[:4] == ["gdal", "raster", "reproject", "--dst-crs"]
-    assert "EPSG:4326" in cmd
-    assert "-r" in cmd and "bilinear" in cmd
-    assert "--co" in cmd and "TILED=YES" in cmd
-    assert "BLOCKXSIZE=256" in cmd
-    assert "BLOCKYSIZE=256" in cmd
-    assert "COMPRESS=DEFLATE" in cmd
-    assert "--overwrite" in cmd
-    assert "--progress" not in cmd
-    assert cmd[-2:] == ["in.tif", "out.tif"]
+def test_gdal_info_text_contains_size(tmp_path: Path):
+    dataset = write_dem_geotiff_4326(tmp_path / "src.tif", width=32, height=16)
+    text = gdal_info(dataset)
+    assert "Size is 32, 16" in text
+    assert "EPSG:4326" in text
+    assert "NoData Value=-9999" in text
 
 
-def test_reproject_cmd_with_progress() -> None:
-    options = PreprocessOptions()
-    cmd = _reproject_cmd(Path("in.tif"), Path("out.tif"), options, show_progress=True)
-    assert "--progress" in cmd
-    assert cmd[-2:] == ["in.tif", "out.tif"]
+def test_gdal_info_rejects_missing_file(tmp_path: Path):
+    with pytest.raises(PreprocessError):
+        gdal_info(tmp_path / "missing.tif")
 
 
-def test_reproject_cmd_with_nodata() -> None:
-    options = PreprocessOptions(nodata_value=-9999.0)
-    cmd = _reproject_cmd(Path("in.tif"), Path("out.tif"), options)
+def test_preprocess_reprojects_fills_and_adds_overviews(tmp_path: Path):
+    source = write_dem_geotiff_4326(
+        tmp_path / "src.tif",
+        width=32,
+        height=32,
+        hole=(12, 12, 16, 16),
+    )
+    work = tmp_path / "work"
+    events: list[tuple[float, str | None]] = []
+    output = preprocess_dem(
+        source,
+        work,
+        PreprocessOptions(
+            target_crs="EPSG:4326",
+            fill_nodata=True,
+            build_overviews=True,
+            block_size=16,
+            nodata_value=-9999.0,
+        ),
+        gdal_cachemax=64,
+        on_subprogress=lambda pct, msg: events.append((pct, msg)),
+    )
+    assert output.name == "preprocessed.tif"
+    assert output.is_file()
+    assert Path(str(output) + ".ovr").is_file()
+    assert events
+    assert events[-1][0] == 100.0
 
-    idx = cmd.index("--input-nodata")
-    assert cmd[idx + 1] == "-9999.0"
-    idx = cmd.index("--output-nodata")
-    assert cmd[idx + 1] == "-9999.0"
+    with GeoTiffReader(output) as dst:
+        itemsize = int(dst.dtype.itemsize)
+        reproject_b = raster_bytes(dst.width, dst.height, 1, itemsize)
+        fill_b = reproject_b
+        overview_b = overview_bytes(dst.width, dst.height, 1, itemsize)
+        preprocess_b = reproject_b + fill_b + overview_b
+    after_reproject = [pct for pct, msg in events if msg and "reproject" in msg]
+    assert after_reproject
+    assert after_reproject[-1] == pytest.approx(100.0 * reproject_b / preprocess_b)
+    after_fill = [pct for pct, msg in events if msg and "fill-nodata" in msg]
+    assert after_fill
+    assert after_fill[-1] == pytest.approx(100.0 * (reproject_b + fill_b) / preprocess_b)
+
+    with GeoTiffReader(output) as dst:
+        assert dst.crs.to_epsg() == 4326
+        assert dst.samples == 1
+        assert dst.width > 0 and dst.height > 0
+        assert dst.nodata == -9999.0
+        window = dst.read_window(12, 12, 4, 4)[:, :, 0]
+        assert not np.any(nodata_mask(window, dst.nodata))
+        assert dst.overview_scales == [2, 4, 8, 16][: len(dst.overview_scales)]
+        assert 2 in dst.overview_scales
 
 
-def test_fill_nodata_cmd() -> None:
-    cmd = _fill_nodata_cmd(Path("warped.tif"), Path("filled.tif"))
-
-    assert cmd == [
-        "gdal",
-        "raster",
-        "fill-nodata",
-        "--max-distance",
-        "10",
-        "--overwrite",
-        "warped.tif",
-        "filled.tif",
-    ]
-
-
-def test_overview_add_cmd() -> None:
-    cmd = _overview_add_cmd(Path("filled.tif"))
-
-    assert cmd == [
-        "gdal",
-        "raster",
-        "overview",
-        "add",
-        "-r",
-        "average",
-        "--levels",
-        "2,4,8,16",
-        "filled.tif",
-    ]
+def test_preprocess_reprojects_to_3857(tmp_path: Path):
+    source = write_dem_geotiff_4326(tmp_path / "src.tif", width=24, height=24)
+    output = preprocess_dem(
+        source,
+        tmp_path / "work",
+        PreprocessOptions(
+            target_crs="EPSG:3857",
+            fill_nodata=False,
+            build_overviews=False,
+            block_size=16,
+        ),
+        gdal_cachemax=32,
+    )
+    with GeoTiffReader(output) as dst:
+        assert dst.crs.to_epsg() == 3857
+        assert dst.samples == 1
+        assert dst.width > 0 and dst.height > 0
 
 
-def test_overview_add_cmd_with_progress() -> None:
-    cmd = _overview_add_cmd(Path("filled.tif"), show_progress=True)
-    assert "--progress" in cmd
-    assert cmd[-1] == "filled.tif"
-
-
-def test_reproject_cmd_rejects_invalid_block_size() -> None:
+def test_preprocess_rejects_invalid_block_size():
     with pytest.raises(ValueError, match="multiple of 16"):
         PreprocessOptions(block_size=65)
