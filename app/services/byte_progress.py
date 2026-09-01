@@ -19,12 +19,13 @@ from app.services.raster.crsutil import (
     parse_crs,
     wgs84_bounds_from_rect,
 )
+from app.services.ctb.constants import GEODETIC_DEFAULT_TILE_SIZE, MERCATOR_DEFAULT_TILE_SIZE
 from app.services.raster.geotiff import GeoTiffReader
 from app.services.raster.overviews import DEFAULT_LEVELS
 from app.services.raster.reproject import plan_destination_grid
 
-# ctb-tile default when ``-t`` / tile_size is omitted.
-CTB_DEFAULT_TILE_SIZE = 65
+# ctb-tile geodetic default when ``-t`` / tile_size is omitted.
+CTB_DEFAULT_TILE_SIZE = GEODETIC_DEFAULT_TILE_SIZE
 
 
 def raster_bytes(width: int, height: int, samples: int = 1, itemsize: int = 1) -> int:
@@ -59,7 +60,11 @@ def fraction_to_bytes(span: int, percent: float) -> int:
 
 
 def ctb_tile_size(options: CtbOptions) -> int:
-    return int(options.tile_size) if options.tile_size is not None else CTB_DEFAULT_TILE_SIZE
+    if options.tile_size is not None:
+        return int(options.tile_size)
+    if options.profile == Profile.MERCATOR:
+        return MERCATOR_DEFAULT_TILE_SIZE
+    return GEODETIC_DEFAULT_TILE_SIZE
 
 
 def auto_max_zoom_geodetic(pixel_size_deg: float, tile_size: int) -> int:

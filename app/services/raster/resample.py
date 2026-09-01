@@ -16,9 +16,15 @@ except ImportError:  # pragma: no cover - optional acceleration
 RESAMPLE_NEAREST = "nearest"
 RESAMPLE_BILINEAR = "bilinear"
 RESAMPLE_CUBIC = "cubic"
+RESAMPLE_CUBICSPLINE = "cubicspline"
 RESAMPLE_LANCZOS = "lanczos"
 RESAMPLE_AVERAGE = "average"
 RESAMPLE_MODE = "mode"
+RESAMPLE_MAX = "max"
+RESAMPLE_MIN = "min"
+RESAMPLE_MED = "med"
+RESAMPLE_Q1 = "q1"
+RESAMPLE_Q3 = "q3"
 
 # Names that denote the same kernel, not approximations of a different kernel.
 _METHOD_ALIASES = {
@@ -26,10 +32,33 @@ _METHOD_ALIASES = {
     "nearest": RESAMPLE_NEAREST,
     "bilinear": RESAMPLE_BILINEAR,
     "cubic": RESAMPLE_CUBIC,
+    "cubicspline": RESAMPLE_CUBICSPLINE,
     "lanczos": RESAMPLE_LANCZOS,
     "average": RESAMPLE_AVERAGE,
     "mode": RESAMPLE_MODE,
     "box": RESAMPLE_AVERAGE,
+    "max": RESAMPLE_MAX,
+    "min": RESAMPLE_MIN,
+    "med": RESAMPLE_MED,
+    "q1": RESAMPLE_Q1,
+    "q3": RESAMPLE_Q3,
+}
+
+KERNEL_RESAMPLING = {
+    RESAMPLE_NEAREST,
+    RESAMPLE_BILINEAR,
+    RESAMPLE_CUBIC,
+    RESAMPLE_CUBICSPLINE,
+    RESAMPLE_LANCZOS,
+}
+AGGREGATE_RESAMPLING = {
+    RESAMPLE_AVERAGE,
+    RESAMPLE_MODE,
+    RESAMPLE_MAX,
+    RESAMPLE_MIN,
+    RESAMPLE_MED,
+    RESAMPLE_Q1,
+    RESAMPLE_Q3,
 }
 
 PIL_RESAMPLING = {
@@ -51,8 +80,6 @@ _CV2_INTER = None if cv2 is None else {
 def normalize_resampling(method: str | ResamplingMethod) -> str:
     key = method.value if isinstance(method, ResamplingMethod) else str(method)
     lower = key.lower()
-    if lower == "cubicspline":
-        raise ValueError("cubicspline is not cubic convolution; this engine does not implement it")
     if lower == "antialias":
         raise ValueError("antialias is not lanczos; this engine does not implement it")
     mapped = _METHOD_ALIASES.get(lower)
@@ -219,6 +246,41 @@ def _lanczos3(x: np.ndarray) -> np.ndarray:
     return out
 
 
+def _cubicspline(x: np.ndarray) -> np.ndarray:
+    """GDAL ``GRA_CubicSpline`` / GWKCubicSpline B-spline kernel."""
+    ax = np.abs(x)
+    out = np.zeros_like(ax, dtype=np.float32)
+    inner = ax < 1.0
+    outer = (ax >= 1.0) & (ax < 2.0)
+    d1 = ax[inner]
+    out[inner] = (0.5 * d1 * d1 * d1) - (d1 * d1) + (2.0 / 3.0)
+    d2 = 2.0 - ax[outer]
+    out[outer] = (1.0 / 6.0) * (d2 * d2 * d2)
+    return out
+
+
+def sample_cubicspline(src: np.ndarray, rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
+    src = _ensure_hwc(src).astype(np.float32, copy=False)
+    height, width, bands = src.shape
+    valid = (rows >= 0) & (rows <= height - 1) & (cols >= 0) & (cols <= width - 1)
+    r_base = np.floor(rows).astype(np.int32)
+    c_base = np.floor(cols).astype(np.int32)
+    acc = np.zeros(rows.shape + (bands,), dtype=np.float32)
+    wsum = np.zeros(rows.shape + (1,), dtype=np.float32)
+    for i in range(-1, 3):
+        wr = _cubicspline(rows - (r_base + i).astype(np.float32))
+        ri = np.clip(r_base + i, 0, height - 1)
+        for j in range(-1, 3):
+            wc = _cubicspline(cols - (c_base + j).astype(np.float32))
+            ci = np.clip(c_base + j, 0, width - 1)
+            weight = (wr * wc)[..., np.newaxis]
+            acc += src[ri, ci] * weight
+            wsum += weight
+    acc = np.divide(acc, wsum, out=np.zeros_like(acc), where=wsum > 0)
+    acc[~valid] = 0
+    return acc
+
+
 def sample_lanczos(src: np.ndarray, rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
     src = _ensure_hwc(src).astype(np.float32, copy=False)
     height, width, bands = src.shape
@@ -247,11 +309,90 @@ def sample_image(src: np.ndarray, rows: np.ndarray, cols: np.ndarray, method: st
         return sample_nearest(src, rows, cols)
     if kind == RESAMPLE_CUBIC:
         return sample_bicubic(src, rows, cols)
+    if kind == RESAMPLE_CUBICSPLINE:
+        return sample_cubicspline(src, rows, cols)
     if kind == RESAMPLE_LANCZOS:
         return sample_lanczos(src, rows, cols)
     if kind == RESAMPLE_BILINEAR:
         return sample_bilinear(src, rows, cols)
     raise ValueError(f"resampling {kind!r} is not implemented for inverse-map sampling")
+
+
+def _aggregate_values(values: np.ndarray, kind: str, fill: float) -> float:
+    if values.size == 0:
+        return fill
+    if kind == RESAMPLE_AVERAGE:
+        return float(np.mean(values))
+    if kind == RESAMPLE_MAX:
+        return float(np.max(values))
+    if kind == RESAMPLE_MIN:
+        return float(np.min(values))
+    if kind == RESAMPLE_MED:
+        return float(np.median(values))
+    if kind == RESAMPLE_Q1:
+        return float(np.percentile(values, 25))
+    if kind == RESAMPLE_Q3:
+        return float(np.percentile(values, 75))
+    if kind == RESAMPLE_MODE:
+        unique, counts = np.unique(values, return_counts=True)
+        return float(unique[int(np.argmax(counts))])
+    raise ValueError(f"resampling {kind!r} is not an aggregate method")
+
+
+def sample_footprint(
+    src: np.ndarray,
+    corner_rows: np.ndarray,
+    corner_cols: np.ndarray,
+    method: str,
+    *,
+    nodata: float | None = None,
+) -> np.ndarray:
+    """Aggregate source pixels covering each destination pixel footprint.
+
+    ``corner_rows`` / ``corner_cols`` are ``(H+1, W+1)`` source PixelIsArea
+    coordinates of destination-pixel corners (GDAL Average/Max/Min/Med/Q1/Q3/Mode).
+    """
+    kind = normalize_resampling(method)
+    if kind not in AGGREGATE_RESAMPLING:
+        raise ValueError(f"resampling {kind!r} is not an aggregate method")
+    src = np.asarray(src, dtype=np.float32)
+    if src.ndim != 2:
+        raise ValueError("sample_footprint expects a 2D source band")
+    height, width = src.shape
+    dest_h = int(corner_rows.shape[0]) - 1
+    dest_w = int(corner_rows.shape[1]) - 1
+    fill = (
+        np.float32("nan")
+        if nodata is None or (isinstance(nodata, float) and np.isnan(nodata))
+        else np.float32(nodata)
+    )
+    out = np.full((dest_h, dest_w), fill, dtype=np.float32)
+    finite = np.isfinite(src)
+    if nodata is not None and not (isinstance(nodata, float) and np.isnan(nodata)):
+        finite = finite & ~nodata_mask(src, nodata)
+    for row in range(dest_h):
+        for col in range(dest_w):
+            rs = corner_rows[row : row + 2, col : col + 2]
+            cs = corner_cols[row : row + 2, col : col + 2]
+            if not np.all(np.isfinite(rs) & np.isfinite(cs)):
+                continue
+            r0 = int(np.floor(rs.min()))
+            r1 = int(np.ceil(rs.max()))
+            c0 = int(np.floor(cs.min()))
+            c1 = int(np.ceil(cs.max()))
+            r0c = max(0, r0)
+            r1c = min(height, max(r0c + 1, r1))
+            c0c = max(0, c0)
+            c1c = min(width, max(c0c + 1, c1))
+            if r0c >= r1c or c0c >= c1c:
+                continue
+            window = src[r0c:r1c, c0c:c1c]
+            mask = finite[r0c:r1c, c0c:c1c]
+            values = window[mask]
+            if values.size == 0:
+                continue
+            out[row, col] = _aggregate_values(values, kind, float(fill))
+    return out
 
 
 def upsample2d(array: np.ndarray, out_h: int, out_w: int) -> np.ndarray:

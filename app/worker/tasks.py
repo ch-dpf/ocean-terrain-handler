@@ -218,11 +218,7 @@ def process_terrain_job(self, job_id: str, request_data: dict) -> dict:
             input_path=preprocessed,
             output_dir=output_dir,
             options=request.ctb_options,
-            docker_image=settings.ctb_docker_image,
-            workspace_dir=settings.workspace_dir,
             gdal_cachemax=settings.gdal_cachemax,
-            host_workspace_dir=settings.host_workspace_dir,
-            workspace_docker_volume=settings.workspace_docker_volume,
             on_subprogress=_tile_progress,
         )
 

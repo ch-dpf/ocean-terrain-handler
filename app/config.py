@@ -22,16 +22,7 @@ class Settings(BaseSettings):
     celery_result_backend: str = "redis://localhost:6379/1"
 
     workspace_dir: Path = Path("/data/workspace")
-    # Host path for docker -v when worker calls CTB via docker.sock (DinD-style).
-    # Must be the host-side path that maps to workspace_dir (e.g. D:/.../data).
-    # Falls back to workspace_dir for local (non-container) workers.
-    # Ignored when workspace_docker_volume is set (preferred on Docker Desktop).
-    host_workspace_dir: Path | None = None
-    # Docker named volume that backs workspace_dir (e.g. ocean-terrain-handler_workspace_data).
-    # When set, CTB is started with ``-v <volume>:/data`` instead of a host bind mount.
-    workspace_docker_volume: str | None = None
-    ctb_docker_image: str = "cesium-terrain-builder:local"
-    # Raster tile-decode cache (MB) for the Python engine; also passed to CTB as GDAL_CACHEMAX.
+    # Raster tile-decode cache (MB) for the Python raster engine and CTB tiler.
     gdal_cachemax: int = 512
     job_ttl: int = 604800
 

@@ -226,10 +226,10 @@ def test_unknown_resampling_is_rejected():
 
 
 def test_cubicspline_is_not_aliased_to_cubic():
-    from app.services.raster.resample import normalize_resampling
+    from app.services.raster.resample import RESAMPLE_CUBIC, RESAMPLE_CUBICSPLINE, normalize_resampling
 
-    with pytest.raises(ValueError, match="cubicspline is not cubic convolution"):
-        normalize_resampling("cubicspline")
+    assert normalize_resampling("cubicspline") == RESAMPLE_CUBICSPLINE
+    assert normalize_resampling("cubicspline") != RESAMPLE_CUBIC
 
 
 def test_geotiff_write_preserves_nonzero_shear(tmp_path: Path):
