@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     # When set, CTB is started with ``-v <volume>:/data`` instead of a host bind mount.
     workspace_docker_volume: str | None = None
     ctb_docker_image: str = "cesium-terrain-builder:local"
+    # Raster tile-decode cache (MB) for the Python engine; also passed to CTB as GDAL_CACHEMAX.
     gdal_cachemax: int = 512
     job_ttl: int = 604800
     progress_calibration_min_samples: int = 3

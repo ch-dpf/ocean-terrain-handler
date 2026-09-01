@@ -44,14 +44,14 @@ class Profile(str, Enum):
 class PreprocessOptions(BaseModel):
     """预处理选项。"""
 
-    target_crs: str = Field(default="EPSG:4326", description="GDAL 重投影目标坐标系")
+    target_crs: str = Field(default="EPSG:4326", description="重投影目标坐标系")
     fill_nodata: bool = Field(default=True, description="切片前填充 NODATA")
-    build_overviews: bool = Field(default=True, description="使用 GDAL 构建概览图")
+    build_overviews: bool = Field(default=True, description="构建 GeoTIFF 低分辨率概览图（overview）")
     # GeoTIFF TileWidth/TileHeight must be multiples of 16 (not CTB's 65px mesh size).
     block_size: int = Field(
         default=256,
         ge=16,
-        description="GDAL TIFF BLOCKXSIZE/BLOCKYSIZE；须为 16 的倍数",
+        description="TIFF BLOCKXSIZE/BLOCKYSIZE；须为 16 的倍数",
     )
     nodata_value: float | None = Field(default=None, description="覆盖 NODATA 值")
 
