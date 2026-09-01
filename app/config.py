@@ -25,7 +25,11 @@ class Settings(BaseSettings):
     # Host path for docker -v when worker calls CTB via docker.sock (DinD-style).
     # Must be the host-side path that maps to workspace_dir (e.g. D:/.../data).
     # Falls back to workspace_dir for local (non-container) workers.
+    # Ignored when workspace_docker_volume is set (preferred on Docker Desktop).
     host_workspace_dir: Path | None = None
+    # Docker named volume that backs workspace_dir (e.g. ocean-terrain-handler_workspace_data).
+    # When set, CTB is started with ``-v <volume>:/data`` instead of a host bind mount.
+    workspace_docker_volume: str | None = None
     ctb_docker_image: str = "cesium-terrain-builder:local"
     gdal_cachemax: int = 512
     job_ttl: int = 604800
@@ -47,10 +51,6 @@ class Settings(BaseSettings):
     @property
     def tilesets_dir(self) -> Path:
         return self.workspace_dir / "tilesets" / "terrain"
-
-    @property
-    def ctb_volume_source(self) -> Path:
-        return self.host_workspace_dir or self.workspace_dir
 
     def terrain_url_for(self, tileset_name: str) -> str:
         base = self.terrain_server_public_url.rstrip("/")

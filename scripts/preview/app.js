@@ -3,6 +3,9 @@
 
   const API_BASE = "/api/v1/terrain";
   const POLL_INTERVAL_MS = 2000;
+  const WS_RECONNECT_BASE_MS = 1000;
+  const WS_RECONNECT_MAX_MS = 15000;
+  const WS_MAX_FAILURES_BEFORE_POLL = 3;
 
   if (typeof Cesium.Ion !== "undefined") {
     Cesium.Ion.defaultAccessToken = undefined;
@@ -25,6 +28,12 @@
   let currentTileset = null;
   let terrainExaggeration = 1.0;
   let pollTimer = null;
+  let progressSocket = null;
+  let progressReconnectTimer = null;
+  let progressWatchJobId = null;
+  let progressWatchMode = null; // "ws" | "poll"
+  let progressWsFailures = 0;
+  let progressWatchGeneration = 0;
   let activePanel = null;
   let lastJobDetail = null;
   let activeSubmitTab = "upload";
@@ -216,6 +225,14 @@
       return;
     }
     viewer.imageryLayers.get(0).alpha = alpha;
+  }
+
+  function applyGlobeLighting() {
+    if (!viewer) {
+      return;
+    }
+    const enabled = document.getElementById("optEnableLighting").checked;
+    viewer.scene.globe.enableLighting = enabled;
   }
 
   function createShadingMaterial(mode) {
@@ -455,6 +472,10 @@
 
     document.getElementById("resetVisualizeBtn").addEventListener("click", function () {
       resetVisualization();
+    });
+
+    document.getElementById("optEnableLighting").addEventListener("change", function () {
+      applyGlobeLighting();
     });
 
     document.querySelectorAll(".sidebar-section-header[data-section]").forEach(function (btn) {
@@ -787,6 +808,43 @@
     }
   }
 
+  function clearLoadedTileset() {
+    if (!viewer) {
+      return;
+    }
+    viewer.terrainProvider = new Cesium.EllipsoidTerrainProvider();
+    currentTileset = null;
+    const url = new URL(window.location.href);
+    url.searchParams.delete("tileset");
+    window.history.replaceState({}, "", url.toString());
+    renderCoords("tileset: —");
+    setStatus("已下架当前地形");
+  }
+
+  async function unpublishTilesetByName(name) {
+    validateTilesetName(name);
+    if (
+      !window.confirm(
+        "确认下架 tileset「" + name + "」？\n仅移除发布链接，不删除源瓦片。",
+      )
+    ) {
+      return;
+    }
+
+    try {
+      await apiFetch("/tilesets/" + encodeURIComponent(name), {
+        method: "DELETE",
+      });
+      if (currentTileset === name) {
+        clearLoadedTileset();
+      }
+      showToast("已下架: " + name, "success");
+      await refreshTilesets();
+    } catch (err) {
+      showToast("下架失败: " + err.message, "error");
+    }
+  }
+
   function formatZoomRange(minZoom, maxZoom) {
     if (minZoom == null || maxZoom == null) {
       return "—";
@@ -850,15 +908,34 @@
         li.classList.add("active");
       }
 
+      const headerEl = document.createElement("div");
+      headerEl.className = "tileset-header";
+
       const nameEl = document.createElement("div");
       nameEl.className = "name";
       nameEl.textContent = item.name;
+
+      const unpublishBtn = document.createElement("button");
+      unpublishBtn.type = "button";
+      unpublishBtn.className = "tileset-unpublish-btn";
+      unpublishBtn.textContent = "下架";
+      unpublishBtn.title = "按名称下架（移除发布链接）";
+      unpublishBtn.addEventListener("click", function (event) {
+        event.stopPropagation();
+        unpublishBtn.disabled = true;
+        unpublishTilesetByName(item.name).finally(function () {
+          unpublishBtn.disabled = false;
+        });
+      });
+
+      headerEl.appendChild(nameEl);
+      headerEl.appendChild(unpublishBtn);
 
       const urlEl = document.createElement("div");
       urlEl.className = "url";
       urlEl.textContent = item.terrain_url || "";
 
-      li.appendChild(nameEl);
+      li.appendChild(headerEl);
       li.appendChild(urlEl);
       li.appendChild(renderTilesetMeta(item));
       li.addEventListener("click", function () {
@@ -895,6 +972,197 @@
       clearInterval(pollTimer);
       pollTimer = null;
     }
+  }
+
+  function stopProgressWatch() {
+    progressWatchGeneration += 1;
+    progressWatchJobId = null;
+    progressWatchMode = null;
+    progressWsFailures = 0;
+    if (progressReconnectTimer) {
+      clearTimeout(progressReconnectTimer);
+      progressReconnectTimer = null;
+    }
+    stopPolling();
+    if (progressSocket) {
+      const socket = progressSocket;
+      progressSocket = null;
+      try {
+        socket.onopen = null;
+        socket.onmessage = null;
+        socket.onerror = null;
+        socket.onclose = null;
+        socket.close();
+      } catch (_err) {
+        /* ignore */
+      }
+    }
+  }
+
+  function jobWsUrl(jobId) {
+    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    return (
+      proto +
+      "//" +
+      window.location.host +
+      API_BASE +
+      "/jobs/" +
+      encodeURIComponent(jobId) +
+      "/ws"
+    );
+  }
+
+  function handleTerminalJob(job) {
+    if (job.status === "completed") {
+      showToast("任务已完成: " + job.job_id, "success");
+      refreshTilesets();
+      if (job.published && job.tileset_name) {
+        loadTileset(job.tileset_name, { flyTo: true }).catch(function () {
+          /* optional auto-preview */
+        });
+      }
+      return true;
+    }
+    if (job.status === "failed") {
+      showToast("任务失败: " + (job.error || job.job_id), "error");
+      return true;
+    }
+    return false;
+  }
+
+  function applyJobUpdate(job) {
+    renderJobDetail(job);
+    if (handleTerminalJob(job)) {
+      stopProgressWatch();
+      return true;
+    }
+    return false;
+  }
+
+  function startPollingFallback(jobId) {
+    stopPolling();
+    progressWatchMode = "poll";
+    progressWatchJobId = jobId;
+
+    async function tick() {
+      try {
+        const job = await fetchJob(jobId);
+        applyJobUpdate(job);
+      } catch (err) {
+        stopProgressWatch();
+        document.getElementById("jobDetail").innerHTML =
+          '<p class="error-text">查询失败: ' + err.message + "</p>";
+        updatePublishControls(null);
+      }
+    }
+
+    tick();
+    pollTimer = setInterval(tick, POLL_INTERVAL_MS);
+  }
+
+  function scheduleWsReconnect(jobId, generation) {
+    if (generation !== progressWatchGeneration || progressWatchJobId !== jobId) {
+      return;
+    }
+    progressWsFailures += 1;
+    if (progressWsFailures >= WS_MAX_FAILURES_BEFORE_POLL) {
+      showToast("WebSocket 不可用，已回退到定时查询", "info");
+      startPollingFallback(jobId);
+      return;
+    }
+    const delay = Math.min(
+      WS_RECONNECT_MAX_MS,
+      WS_RECONNECT_BASE_MS * Math.pow(2, progressWsFailures - 1),
+    );
+    progressReconnectTimer = setTimeout(function () {
+      progressReconnectTimer = null;
+      if (generation !== progressWatchGeneration || progressWatchJobId !== jobId) {
+        return;
+      }
+      fetchJob(jobId)
+        .then(function (job) {
+          if (applyJobUpdate(job)) return;
+          openJobWebSocket(jobId, generation);
+        })
+        .catch(function () {
+          openJobWebSocket(jobId, generation);
+        });
+    }, delay);
+  }
+
+  function openJobWebSocket(jobId, generation) {
+    if (generation !== progressWatchGeneration || progressWatchJobId !== jobId) {
+      return;
+    }
+    if (progressSocket) {
+      try {
+        progressSocket.onclose = null;
+        progressSocket.close();
+      } catch (_err) {
+        /* ignore */
+      }
+      progressSocket = null;
+    }
+
+    progressWatchMode = "ws";
+    let socket;
+    try {
+      socket = new WebSocket(jobWsUrl(jobId));
+    } catch (_err) {
+      scheduleWsReconnect(jobId, generation);
+      return;
+    }
+    progressSocket = socket;
+
+    socket.onmessage = function (event) {
+      if (generation !== progressWatchGeneration) return;
+      let job;
+      try {
+        job = JSON.parse(event.data);
+      } catch (_err) {
+        return;
+      }
+      if (job && job.detail && !job.job_id) {
+        stopProgressWatch();
+        document.getElementById("jobDetail").innerHTML =
+          '<p class="error-text">查询失败: ' + job.detail + "</p>";
+        updatePublishControls(null);
+        return;
+      }
+      progressWsFailures = 0;
+      applyJobUpdate(job);
+    };
+
+    socket.onerror = function () {
+      /* onclose handles reconnect */
+    };
+
+    socket.onclose = function () {
+      if (progressSocket === socket) {
+        progressSocket = null;
+      }
+      if (generation !== progressWatchGeneration || progressWatchJobId !== jobId) {
+        return;
+      }
+      if (progressWatchMode !== "ws") {
+        return;
+      }
+      scheduleWsReconnect(jobId, generation);
+    };
+  }
+
+  function startProgressWatch(jobId) {
+    stopProgressWatch();
+    setJobIdFields(jobId);
+    progressWatchJobId = jobId;
+    progressWsFailures = 0;
+    const generation = progressWatchGeneration;
+
+    if (typeof WebSocket === "undefined") {
+      startPollingFallback(jobId);
+      return;
+    }
+    openJobWebSocket(jobId, generation);
   }
 
   function statusBadgeClass(status) {
@@ -1006,7 +1274,6 @@
 
   function renderJobDetail(job) {
     const detailEl = document.getElementById("jobDetail");
-    const previewBtn = document.getElementById("openJobTilesetBtn");
 
     renderJobProgress(job);
 
@@ -1031,61 +1298,11 @@
       })
       .join("");
 
-    const canPreview = job.published && job.tileset_name;
-    previewBtn.disabled = !canPreview;
-    previewBtn.onclick = function () {
-      if (!canPreview) {
-        return;
-      }
-      loadTileset(job.tileset_name, { flyTo: true })
-        .then(function () {
-          closePanel();
-          showToast("已打开 tileset: " + job.tileset_name, "success");
-        })
-        .catch(function (err) {
-          showToast("预览失败: " + err.message, "error");
-        });
-    };
-
     updatePublishControls(job);
   }
 
   async function fetchJob(jobId) {
     return apiFetch("/jobs/" + encodeURIComponent(jobId));
-  }
-
-  function startPolling(jobId) {
-    stopPolling();
-    setJobIdFields(jobId);
-
-    async function tick() {
-      try {
-        const job = await fetchJob(jobId);
-        renderJobDetail(job);
-
-        if (job.status === "completed") {
-          stopPolling();
-          showToast("任务已完成: " + jobId, "success");
-          refreshTilesets();
-          if (job.published && job.tileset_name) {
-            loadTileset(job.tileset_name, { flyTo: true }).catch(function () {
-              /* optional auto-preview */
-            });
-          }
-        } else if (job.status === "failed") {
-          stopPolling();
-          showToast("任务失败: " + (job.error || jobId), "error");
-        }
-      } catch (err) {
-        stopPolling();
-        document.getElementById("jobDetail").innerHTML =
-          '<p class="error-text">查询失败: ' + err.message + "</p>";
-        updatePublishControls(null);
-      }
-    }
-
-    tick();
-    pollTimer = setInterval(tick, POLL_INTERVAL_MS);
   }
 
   async function lookupJob() {
@@ -1094,7 +1311,7 @@
       showToast("请输入任务 ID", "error");
       return;
     }
-    startPolling(jobId);
+    startProgressWatch(jobId);
   }
 
   async function refreshJobOnce(jobId) {
@@ -1230,7 +1447,7 @@
     showToast(message, "success");
     setJobIdFields(jobId);
     openPanel("progress");
-    startPolling(jobId);
+    startProgressWatch(jobId);
   }
 
   async function submitUpload() {
@@ -1382,7 +1599,8 @@
       if (entry.entry_type === "directory") {
         meta.textContent = "目录";
       } else if (entry.selectable) {
-        meta.textContent = formatFileSize(entry.size_bytes);
+        const sizeLabel = formatFileSize(entry.size_bytes);
+        meta.textContent = sizeLabel ? sizeLabel : "DEM";
       } else {
         meta.textContent = "不可选";
         li.classList.add("disabled");
@@ -1590,7 +1808,12 @@
       selectionIndicator: false,
     });
 
-    viewer.scene.globe.enableLighting = true;
+    const lightingParam = getQueryParam("lighting");
+    if (lightingParam !== null) {
+      document.getElementById("optEnableLighting").checked =
+        lightingParam === "1" || lightingParam.toLowerCase() === "true";
+    }
+    applyGlobeLighting();
     applyTerrainExaggeration(parseNumber(getQueryParam("exaggeration"), 1.0));
 
     const handler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
@@ -1653,7 +1876,7 @@
     if (jobId) {
       openPanel("progress");
       setJobIdFields(jobId);
-      startPolling(jobId);
+      startProgressWatch(jobId);
     }
 
     if (tileset) {

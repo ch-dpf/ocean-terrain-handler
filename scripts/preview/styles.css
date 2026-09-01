@@ -377,9 +377,20 @@ body {
   background: rgba(0, 120, 215, 0.15);
 }
 
+.tileset-item .tileset-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
 .tileset-item .name {
   font-weight: 600;
-  margin-bottom: 4px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .tileset-item .url {
@@ -410,6 +421,28 @@ body {
 
 .tileset-item .meta-tag.format-mesh {
   color: #90caf9;
+}
+
+.tileset-item .tileset-unpublish-btn {
+  flex-shrink: 0;
+  background: rgba(80, 80, 80, 0.95);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.tileset-item .tileset-unpublish-btn:hover {
+  background: rgba(160, 50, 50, 0.9);
+  border-color: rgba(200, 80, 80, 0.9);
+}
+
+.tileset-item .tileset-unpublish-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .tileset-item .meta-tag.format-terrain {
@@ -652,8 +685,8 @@ body {
   border-left: 4px solid #66bb6a;
 }
 
-.toast.success {
-  border-left: 4px solid #66bb6a;
+.toast.info {
+  border-left: 4px solid #42a5f5;
 }
 
 .panel-hint {

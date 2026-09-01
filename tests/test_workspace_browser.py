@@ -35,18 +35,20 @@ def test_list_workspace_root(tmp_path: Path) -> None:
     assert "nested" in names
     assert "a.tif" in names
     assert "b.dem" in names
-    assert "readme.txt" in names
+    assert "readme.txt" not in names  # non-DEM files are omitted
     assert "jobs" not in names
 
     tif = next(entry for entry in listing.entries if entry.name == "a.tif")
     assert tif.selectable is True
-    assert tif.size_bytes == 4
+    assert tif.size_bytes is None  # size skipped for bind-mount performance
+    assert tif.absolute_path == str(workspace / "a.tif")
 
     dem = next(entry for entry in listing.entries if entry.name == "b.dem")
     assert dem.selectable is True
 
-    txt = next(entry for entry in listing.entries if entry.name == "readme.txt")
-    assert txt.selectable is False
+    nested = next(entry for entry in listing.entries if entry.name == "nested")
+    assert nested.entry_type == "directory"
+    assert nested.selectable is False
 
 
 def test_list_workspace_subdirectory(tmp_path: Path) -> None:
@@ -54,6 +56,7 @@ def test_list_workspace_subdirectory(tmp_path: Path) -> None:
     nested = workspace / "nested"
     nested.mkdir(parents=True)
     (nested / "scene.tiff").write_bytes(b"abc")
+    (nested / "notes.md").write_bytes(b"x")
 
     listing = list_workspace(workspace, "nested")
 
@@ -62,3 +65,24 @@ def test_list_workspace_subdirectory(tmp_path: Path) -> None:
     assert len(listing.entries) == 1
     assert listing.entries[0].name == "scene.tiff"
     assert listing.entries[0].selectable is True
+    assert listing.entries[0].absolute_path == str(workspace / "nested" / "scene.tiff")
+
+
+def test_list_workspace_large_dem_folder_is_fast(tmp_path: Path) -> None:
+    """Regression: listing thousands of DEM names must not resolve/stat each file."""
+    import time
+
+    workspace = tmp_path / "workspace"
+    folder = workspace / "many"
+    folder.mkdir(parents=True)
+    for index in range(1500):
+        (folder / f"tile_{index:04d}.tif").write_bytes(b"x")
+    (folder / "ignore.txt").write_bytes(b"y")
+
+    started = time.perf_counter()
+    listing = list_workspace(workspace, "many")
+    elapsed = time.perf_counter() - started
+
+    assert len(listing.entries) == 1500
+    assert all(entry.selectable for entry in listing.entries)
+    assert elapsed < 2.0

@@ -1,11 +1,23 @@
 """REST API routes."""
 
+import asyncio
 import json
+import logging
 import shutil
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, Body, File, Form, HTTPException, Query, UploadFile
+from fastapi import (
+    APIRouter,
+    Body,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
@@ -25,9 +37,10 @@ from app.schemas import (
 )
 from app.services.job_progress import compute_elapsed_seconds
 from app.services.job_store import JobStore
-from app.services.layer_json import read_layer_metadata
+from app.services.provenance import load_job_from_disk
 from app.services.tile_publisher import (
     PublishError,
+    get_tileset_display_meta,
     list_published_tilesets,
     publish_from_disk,
     unpublish_tileset,
@@ -40,7 +53,11 @@ from app.worker.tasks import (
     unpublish_completed_job,
 )
 
-router = APIRouter(prefix="/api/v1/terrain", tags=["terrain"])
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/v1/terrain", tags=["地形"])
+
+_TERMINAL_STATUSES = frozenset({JobStatus.COMPLETED, JobStatus.FAILED})
 
 _JOB_DETAIL_FIELDS = {
     "job_id",
@@ -61,6 +78,14 @@ _JOB_DETAIL_FIELDS = {
 
 def _store() -> JobStore:
     return JobStore(get_settings())
+
+
+def _resolve_job(job_id: str) -> dict | None:
+    """Resolve job metadata from Redis, falling back to durable disk lineage."""
+    data = _store().get(job_id)
+    if data is not None:
+        return data
+    return load_job_from_disk(get_settings().jobs_dir, job_id)
 
 
 def _progress_from_store(data: dict) -> JobProgress | None:
@@ -93,16 +118,32 @@ def _job_detail_from_store(data: dict) -> TerrainJobDetail:
     )
 
 
-class ManualPublishRequest(BaseModel):
-    tileset_name: str | None = Field(
-        default=None,
-        description="Override tileset name; omit to use job_id",
+def _job_urls(job_id: str) -> tuple[str, str]:
+    base = f"/api/v1/terrain/jobs/{job_id}"
+    return base, f"{base}/ws"
+
+
+def _job_queued_response(job_id: str, message: str) -> TerrainJobResponse:
+    progress_url, progress_ws_url = _job_urls(job_id)
+    return TerrainJobResponse(
+        job_id=job_id,
+        status=JobStatus.QUEUED,
+        progress_url=progress_url,
+        progress_ws_url=progress_ws_url,
+        message=message,
     )
 
 
-@router.post("/jobs", response_model=TerrainJobResponse)
+class ManualPublishRequest(BaseModel):
+    tileset_name: str | None = Field(
+        default=None,
+        description="覆盖发布名称；省略则使用 job_id",
+    )
+
+
+@router.post("/jobs", response_model=TerrainJobResponse, summary="提交工作区文件任务")
 async def create_job(request: TerrainJobCreate) -> TerrainJobResponse:
-    """Submit a tiling job for an existing file in the workspace."""
+    """针对工作区内已有 DEM/TIF 文件提交切片任务。"""
     try:
         job_id = create_job_from_path(request)
     except FileNotFoundError as exc:
@@ -110,22 +151,26 @@ async def create_job(request: TerrainJobCreate) -> TerrainJobResponse:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return TerrainJobResponse(
-        job_id=job_id,
-        status=JobStatus.QUEUED,
-        progress_url=f"/api/v1/terrain/jobs/{job_id}",
-        message="Job queued",
-    )
+    return _job_queued_response(job_id, "Job queued")
 
 
-@router.post("/jobs/upload", response_model=TerrainJobResponse)
+@router.post("/jobs/upload", response_model=TerrainJobResponse, summary="上传文件并提交任务")
 async def create_job_with_upload(
-    file: UploadFile = File(...),
-    preprocess_json: str | None = Form(default=None),
-    ctb_options_json: str | None = Form(default=None),
-    publish_json: str | None = Form(default=None),
+    file: UploadFile = File(..., description="待处理的 DEM/TIF 文件（.tif / .tiff / .dem / .img）"),
+    preprocess_json: str | None = Form(
+        default=None,
+        description="预处理选项 JSON 字符串（对应 PreprocessOptions）",
+    ),
+    ctb_options_json: str | None = Form(
+        default=None,
+        description="CTB 切片选项 JSON 字符串（对应 CtbOptions）",
+    ),
+    publish_json: str | None = Form(
+        default=None,
+        description="发布选项 JSON 字符串（对应 PublishOptions）",
+    ),
 ) -> TerrainJobResponse:
-    """Upload a TIF and submit a tiling job."""
+    """上传 TIF/DEM 文件并提交切片任务。"""
     settings = get_settings()
     settings.uploads_dir.mkdir(parents=True, exist_ok=True)
 
@@ -155,32 +200,91 @@ async def create_job_with_upload(
     finally:
         temp_path.unlink(missing_ok=True)
 
-    return TerrainJobResponse(
-        job_id=job_id,
-        status=JobStatus.QUEUED,
-        progress_url=f"/api/v1/terrain/jobs/{job_id}",
-        message="Upload received, job queued",
-    )
+    return _job_queued_response(job_id, "Upload received, job queued")
 
 
-@router.get("/jobs/{job_id}", response_model=TerrainJobDetail)
+@router.get("/jobs/{job_id}", response_model=TerrainJobDetail, summary="查询任务详情")
 async def get_job(job_id: str) -> TerrainJobDetail:
-    """Get job status and result paths."""
-    data = _store().get(job_id)
+    """获取任务状态、进度、输出路径与发布信息（REST 快照；实时进度见 WebSocket）。
+
+    Redis 记录过期后，回退读取 ``jobs/{job_id}/manifest.json``（或已有 tiles 目录）。
+    """
+    data = _resolve_job(job_id)
     if data is None:
         raise HTTPException(status_code=404, detail="Job not found")
 
     return _job_detail_from_store(data)
 
 
-@router.post("/jobs/{job_id}/publish", response_model=TerrainJobDetail)
+@router.websocket("/jobs/{job_id}/ws")
+async def watch_job_progress(websocket: WebSocket, job_id: str) -> None:
+    """推送任务进度：连接时先发当前快照，随后订阅 Redis pub/sub。
+
+    消息体与 ``GET /jobs/{job_id}`` 相同（``TerrainJobDetail`` JSON）。
+    任务进入 ``completed`` / ``failed`` 后发送终态并关闭连接。
+    Redis 过期时回退磁盘快照；无 live Redis 记录时仅发送快照后关闭。
+    """
+    await websocket.accept()
+    store = _store()
+    live = store.get(job_id)
+    data = live if live is not None else load_job_from_disk(get_settings().jobs_dir, job_id)
+    if data is None:
+        await websocket.send_json({"detail": "Job not found"})
+        await websocket.close(code=4404)
+        return
+
+    detail = _job_detail_from_store(data)
+    await websocket.send_json(detail.model_dump(mode="json"))
+    if detail.status in _TERMINAL_STATUSES or live is None:
+        await websocket.close()
+        return
+
+    channel = store.events_channel(job_id)
+    pubsub = store.redis.pubsub(ignore_subscribe_messages=True)
+    pubsub.subscribe(channel)
+    try:
+        while True:
+            if websocket.client_state.name != "CONNECTED":
+                return
+            raw_message = await asyncio.to_thread(pubsub.get_message, True, 1.0)
+            if raw_message is None or raw_message.get("type") != "message":
+                continue
+
+            payload = raw_message.get("data")
+            if not isinstance(payload, str):
+                continue
+            try:
+                event_data = json.loads(payload)
+            except json.JSONDecodeError:
+                logger.warning("Invalid progress event JSON for job %s", job_id)
+                continue
+
+            detail = _job_detail_from_store(event_data)
+            try:
+                await websocket.send_json(detail.model_dump(mode="json"))
+            except (WebSocketDisconnect, RuntimeError):
+                return
+            if detail.status in _TERMINAL_STATUSES:
+                await websocket.close()
+                return
+    except WebSocketDisconnect:
+        return
+    finally:
+        try:
+            pubsub.unsubscribe(channel)
+            pubsub.close()
+        except Exception:  # noqa: BLE001 — best-effort cleanup
+            logger.debug("pubsub cleanup failed for job %s", job_id, exc_info=True)
+
+
+@router.post("/jobs/{job_id}/publish", response_model=TerrainJobDetail, summary="按任务发布瓦片")
 async def publish_job(
     job_id: str,
     body: ManualPublishRequest | None = Body(default=None),
 ) -> TerrainJobDetail:
-    """Publish a completed job's tiles via terrain-server (nginx).
+    """通过 terrain-server（nginx）发布已完成任务的瓦片。
 
-    If Redis job metadata has expired, publishes from disk at jobs/{job_id}/tiles/.
+    若 Redis 中任务元数据已过期，则从磁盘路径 ``jobs/{job_id}/tiles/`` 发布。
     """
     tileset_name = body.tileset_name if body is not None else None
     try:
@@ -192,8 +296,16 @@ async def publish_job(
         status = 404 if "not found" in detail.lower() else 500
         raise HTTPException(status_code=status, detail=detail) from exc
 
-    data = _store().get(job_id)
+    data = _resolve_job(job_id)
     if data is not None:
+        data = {
+            **data,
+            "status": JobStatus.COMPLETED.value,
+            "stage": "done",
+            "terrain_url": terrain_url,
+            "tileset_name": resolved_name,
+            "published": True,
+        }
         return _job_detail_from_store(data)
 
     settings = get_settings()
@@ -208,11 +320,11 @@ async def publish_job(
     )
 
 
-@router.delete("/jobs/{job_id}/publish", response_model=TerrainJobDetail)
+@router.delete("/jobs/{job_id}/publish", response_model=TerrainJobDetail, summary="按任务下架瓦片")
 async def unpublish_job(job_id: str) -> TerrainJobDetail:
-    """Remove a job's published tileset registration.
+    """移除任务对应的已发布 tileset 注册。
 
-    If Redis metadata is gone, removes the symlink named after job_id when present.
+    若 Redis 元数据已不存在，则在存在时删除以 job_id 命名的符号链接。
     """
     try:
         unpublish_completed_job(job_id)
@@ -221,8 +333,14 @@ async def unpublish_job(job_id: str) -> TerrainJobDetail:
     except PublishError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    data = _store().get(job_id)
+    data = _resolve_job(job_id)
     if data is not None:
+        data = {
+            **data,
+            "published": False,
+            "terrain_url": None,
+            "tileset_name": None,
+        }
         return _job_detail_from_store(data)
 
     return TerrainJobDetail(
@@ -232,21 +350,29 @@ async def unpublish_job(job_id: str) -> TerrainJobDetail:
     )
 
 
-@router.get("/tilesets", response_model=TilesetListResponse)
+@router.get("/tilesets", response_model=TilesetListResponse, summary="列出已发布图层")
 async def list_tilesets() -> TilesetListResponse:
-    """List tilesets registered for terrain-server (nginx)."""
+    """列出已在 terrain-server（nginx）注册的 tileset。
+
+    展示元数据优先读发布旁路的 ``.{name}.layer-meta.json`` / 内存缓存，
+    避免每次跟随 symlink 进入大型 tiles 目录。
+    """
     settings = get_settings()
-    names = list_published_tilesets(settings.tilesets_dir)
-    tilesets = [_tileset_info_from_name(name, settings) for name in names]
+
+    def _load() -> list[TilesetInfo]:
+        names = list_published_tilesets(settings.tilesets_dir)
+        return [_tileset_info_from_name(name, settings) for name in names]
+
+    tilesets = await asyncio.to_thread(_load)
     return TilesetListResponse(tilesets=tilesets)
 
 
-@router.post("/tilesets/publish", response_model=TilesetInfo)
+@router.post("/tilesets/publish", response_model=TilesetInfo, summary="按磁盘路径发布图层")
 async def publish_tileset_from_disk(body: DiskPublishRequest) -> TilesetInfo:
-    """Publish tiles from disk without requiring Redis job metadata.
+    """不依赖 Redis 任务元数据，直接从磁盘发布瓦片。
 
-    Provide either ``job_id`` (uses ``jobs/{job_id}/tiles/``) or ``tiles_dir``.
-    Metadata is inferred from existing ``layer.json`` when available.
+    需提供 ``job_id``（使用 ``jobs/{job_id}/tiles/``）或 ``tiles_dir`` 之一。
+    元数据在已有 ``layer.json`` 时自动推断。
     """
     settings = get_settings()
     try:
@@ -287,12 +413,12 @@ async def publish_tileset_from_disk(body: DiskPublishRequest) -> TilesetInfo:
                 output_dir=str(tiles_dir),
             )
 
-    return _tileset_info_from_name(name, settings)
+    return _tileset_info_from_name(name, settings, tiles_dir=tiles_dir)
 
 
-@router.delete("/tilesets/{tileset_name}", response_model=TilesetInfo)
+@router.delete("/tilesets/{tileset_name}", response_model=TilesetInfo, summary="按名称下架图层")
 async def unpublish_tileset_by_name(tileset_name: str) -> TilesetInfo:
-    """Unpublish a tileset by name without requiring Redis job metadata."""
+    """按名称下架 tileset，无需 Redis 任务元数据。"""
     settings = get_settings()
     info = _tileset_info_from_name(tileset_name, settings)
     try:
@@ -302,8 +428,13 @@ async def unpublish_tileset_by_name(tileset_name: str) -> TilesetInfo:
     return info
 
 
-def _tileset_info_from_name(name: str, settings) -> TilesetInfo:
-    meta = read_layer_metadata(settings.tilesets_dir / name)
+def _tileset_info_from_name(
+    name: str,
+    settings,
+    *,
+    tiles_dir: Path | None = None,
+) -> TilesetInfo:
+    meta = get_tileset_display_meta(settings.tilesets_dir, name, tiles_dir=tiles_dir)
     return TilesetInfo(
         name=name,
         terrain_url=settings.terrain_url_for(name),
@@ -316,14 +447,14 @@ def _tileset_info_from_name(name: str, settings) -> TilesetInfo:
     )
 
 
-@router.get("/workspace", response_model=WorkspaceListResponse)
+@router.get("/workspace", response_model=WorkspaceListResponse, summary="浏览工作区文件")
 async def list_workspace_entries(
-    path: str = Query(default="", description="Directory path relative to workspace root"),
+    path: str = Query(default="", description="相对工作区根目录的路径"),
 ) -> WorkspaceListResponse:
-    """List directories and selectable DEM files in the workspace."""
+    """列出工作区内的目录与可选 DEM 文件（大目录在线程池中扫描，避免阻塞事件循环）。"""
     settings = get_settings()
     try:
-        listing = list_workspace(settings.workspace_dir, path)
+        listing = await asyncio.to_thread(list_workspace, settings.workspace_dir, path)
     except WorkspacePathError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

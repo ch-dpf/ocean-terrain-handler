@@ -8,6 +8,8 @@ import pytest
 from app.schemas import OutputFormat, Profile
 from app.services.tile_publisher import (
     PublishError,
+    display_meta_path,
+    get_tileset_display_meta,
     infer_job_id_from_tiles_dir,
     list_published_tilesets,
     publish_from_disk,
@@ -15,6 +17,7 @@ from app.services.tile_publisher import (
     resolve_job_tiles_dir,
     resolve_tiles_dir_path,
     unpublish_tileset,
+    write_tileset_display_meta,
 )
 
 
@@ -51,6 +54,8 @@ def test_publish_tileset_creates_symlink_and_layer_json(tile_dirs):
     assert terrain_url == "http://localhost:8080/tilesets/job-1"
     assert (tilesets_dir / "job-1").is_symlink()
     assert (tiles_dir / "layer.json").is_file()
+    assert (tiles_dir / "provenance.json").is_file()
+    assert display_meta_path(tilesets_dir, "job-1").is_file()
     assert list_published_tilesets(tilesets_dir) == ["job-1"]
 
 
@@ -126,12 +131,59 @@ def test_unpublish_tileset(tile_dirs):
 
     unpublish_tileset(tilesets_dir, "job-1")
     assert list_published_tilesets(tilesets_dir) == []
+    assert not display_meta_path(tilesets_dir, "job-1").is_file()
 
 
 def test_unpublish_missing_raises(tile_dirs):
     _, tilesets_dir = tile_dirs
     with pytest.raises(PublishError):
         unpublish_tileset(tilesets_dir, "missing")
+
+
+def test_list_published_tilesets_symlink_first(tmp_path: Path):
+    tilesets_dir = tmp_path / "tilesets"
+    tilesets_dir.mkdir()
+    (tilesets_dir / ".hidden-meta.layer-meta.json").write_text("{}", encoding="utf-8")
+    (tilesets_dir / "plain.txt").write_text("x", encoding="utf-8")
+    real_dir = tilesets_dir / "copied-set"
+    real_dir.mkdir()
+    if os.name == "nt":
+        # Still list real directories even when symlink creation is unavailable.
+        assert list_published_tilesets(tilesets_dir) == ["copied-set"]
+        return
+
+    target = tmp_path / "tiles"
+    target.mkdir()
+    (tilesets_dir / "linked-set").symlink_to(target, target_is_directory=True)
+    assert list_published_tilesets(tilesets_dir) == ["copied-set", "linked-set"]
+
+
+def test_get_tileset_display_meta_uses_sidecar_without_tiles(tmp_path: Path):
+    from app.services.tile_publisher import _display_meta_memory
+
+    tilesets_dir = tmp_path / "tilesets"
+    tilesets_dir.mkdir()
+    write_tileset_display_meta(
+        tilesets_dir,
+        "coast",
+        {
+            "format": "quantized-mesh-1.0",
+            "format_label": "量化网格",
+            "projection": "EPSG:4326",
+            "crs": "WGS84",
+            "min_zoom": 0,
+            "max_zoom": 12,
+        },
+    )
+    _display_meta_memory.clear()
+
+    meta = get_tileset_display_meta(tilesets_dir, "coast")
+    assert meta["format"] == "quantized-mesh-1.0"
+    assert meta["max_zoom"] == 12
+
+    # Second call hits memory cache.
+    meta2 = get_tileset_display_meta(tilesets_dir, "coast")
+    assert meta2["min_zoom"] == 0
 
 
 def test_infer_job_id_from_tiles_dir(tmp_path: Path):

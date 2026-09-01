@@ -19,6 +19,13 @@ from app.services.job_progress import (
 from app.services.job_store import JobStore
 from app.services.preprocessor import PreprocessError, preprocess_dem
 from app.services.progress_calibration import ProgressCalibrationStore
+from app.services.provenance import (
+    build_source_info,
+    update_manifest,
+    write_manifest_completed,
+    write_manifest_created,
+    write_manifest_failed,
+)
 from app.services.tile_publisher import PublishError, publish_tileset
 from app.worker.celery_app import celery_app
 
@@ -177,6 +184,13 @@ def process_terrain_job(self, job_id: str, request_data: dict) -> dict:
         if not input_path.is_file():
             raise FileNotFoundError(f"Input file not found: {input_path}")
 
+        update_manifest(
+            job_dir,
+            status="running",
+            source=build_source_info(input_path, compute_hash=True),
+            output_dir=str(output_dir),
+        )
+
         reporter.begin_stage(
             "gdal_preprocess",
             status=JobStatus.PREPROCESSING,
@@ -217,6 +231,7 @@ def process_terrain_job(self, job_id: str, request_data: dict) -> dict:
             workspace_dir=settings.workspace_dir,
             gdal_cachemax=settings.gdal_cachemax,
             host_workspace_dir=settings.host_workspace_dir,
+            workspace_docker_volume=settings.workspace_docker_volume,
             on_subprogress=_tile_progress,
         )
 
@@ -227,6 +242,7 @@ def process_terrain_job(self, job_id: str, request_data: dict) -> dict:
             "published": False,
         }
 
+        completed_at = _utc_now_iso()
         if auto_publish:
             terrain_url, tileset_name = _publish_job_tileset(
                 job_id, output_dir, request, settings, reporter=reporter
@@ -240,7 +256,15 @@ def process_terrain_job(self, job_id: str, request_data: dict) -> dict:
                 tileset_name=tileset_name,
                 published=True,
                 error=None,
-                completed_at=_utc_now_iso(),
+                completed_at=completed_at,
+            )
+            write_manifest_completed(
+                job_dir,
+                output_dir=output_dir,
+                published=True,
+                tileset_name=tileset_name,
+                terrain_url=terrain_url,
+                completed_at=completed_at,
             )
             reporter.complete(message="Completed and published")
             result.update(
@@ -258,7 +282,13 @@ def process_terrain_job(self, job_id: str, request_data: dict) -> dict:
                 output_dir=str(output_dir),
                 published=False,
                 error=None,
-                completed_at=_utc_now_iso(),
+                completed_at=completed_at,
+            )
+            write_manifest_completed(
+                job_dir,
+                output_dir=output_dir,
+                published=False,
+                completed_at=completed_at,
             )
             reporter.complete(message="Completed")
 
@@ -270,14 +300,16 @@ def process_terrain_job(self, job_id: str, request_data: dict) -> dict:
         failed_progress = reporter.tracker.snapshot()
         failed_progress.message = str(exc)
         failed_progress.phase = "failed"
+        failed_at = _utc_now_iso()
         store.update(
             job_id,
             status=JobStatus.FAILED.value,
             stage="failed",
             error=str(exc),
-            completed_at=_utc_now_iso(),
+            completed_at=failed_at,
             **progress_to_store_fields(failed_progress),
         )
+        write_manifest_failed(job_dir, error=str(exc), completed_at=failed_at)
         raise
 
 
@@ -374,13 +406,21 @@ def create_job_from_upload(
     shutil.copy2(uploaded_path, input_dest)
 
     request_with_path = request.model_copy(update={"input_path": str(input_dest)})
+    output_dir = job_dir / "tiles"
     store.create(
         job_id,
         {
             "input_path": str(input_dest),
-            "output_dir": str(job_dir / "tiles"),
+            "output_dir": str(output_dir),
             "request": request_with_path.model_dump(),
         },
+    )
+    write_manifest_created(
+        job_dir,
+        job_id=job_id,
+        input_path=input_dest,
+        output_dir=output_dir,
+        request=request_with_path,
     )
     process_terrain_job.delay(job_id, request_with_path.model_dump())
     return job_id
@@ -399,13 +439,23 @@ def create_job_from_path(request: TerrainJobCreate) -> str:
     if not input_path.is_file():
         raise FileNotFoundError(f"Input file not found: {input_path}")
 
+    job_dir = settings.jobs_dir / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = job_dir / "tiles"
     store.create(
         job_id,
         {
             "input_path": str(input_path),
-            "output_dir": str(settings.jobs_dir / job_id / "tiles"),
+            "output_dir": str(output_dir),
             "request": request.model_dump(),
         },
+    )
+    write_manifest_created(
+        job_dir,
+        job_id=job_id,
+        input_path=input_path,
+        output_dir=output_dir,
+        request=request,
     )
     process_terrain_job.delay(job_id, request.model_dump())
     return job_id

@@ -14,7 +14,10 @@ services:
     env_file:
       - .env
     volumes:
-      - ./data:/data/workspace
+      # jobs / tilesets / uploads on Linux named volume (fast tile I/O).
+      - workspace_data:/data/workspace
+      # DEM inputs stay on the host bind (usually D:) to avoid filling Docker's C: disk.
+      - ./data/source:/data/workspace/source
     depends_on:
       - redis
 
@@ -23,8 +26,12 @@ services:
     command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=2
     env_file:
       - .env
+    environment:
+      # Prefer named-volume mount for CTB (docker.sock); overrides host bind when set.
+      WORKSPACE_DOCKER_VOLUME: ${WORKSPACE_DOCKER_VOLUME:-ocean-terrain-handler_workspace_data}
     volumes:
-      - ./data:/data/workspace
+      - workspace_data:/data/workspace
+      - ./data/source:/data/workspace/source
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       - redis
@@ -36,8 +43,8 @@ services:
     ports:
       - "8103:80"
     volumes:
-      # Full data mount so tileset symlinks (../../jobs/...) resolve inside the container.
-      - ./data:/data
+      # Same volume as API workspace root so relative tileset symlinks resolve.
+      - workspace_data:/data
       - ./scripts/preview:/usr/share/nginx/preview:ro
       - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
@@ -46,3 +53,6 @@ services:
 
 volumes:
   redis_data:
+  workspace_data:
+    # Stable name so CTB / migrate scripts can reference it.
+    name: ocean-terrain-handler_workspace_data

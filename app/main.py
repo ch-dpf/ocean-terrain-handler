@@ -25,14 +25,25 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(
-    title="Ocean Terrain Handler",
-    description="Terrain TIF preprocessing and Cesium terrain tile slicing service",
+    title="海洋地形处理服务",
+    description="地形 TIF 预处理与 Cesium 地形瓦片切片服务",
     version="0.1.0",
     lifespan=lifespan,
+    openapi_tags=[
+        {
+            "name": "地形",
+            "description": "任务提交、进度查询、瓦片发布/下架与工作区浏览",
+        },
+        {
+            "name": "系统",
+            "description": "健康检查等系统接口",
+        },
+    ],
 )
 app.include_router(router)
 
 
-@app.get("/health")
+@app.get("/health", tags=["系统"], summary="健康检查")
 async def health() -> dict[str, str]:
+    """返回服务健康状态。"""
     return {"status": "ok"}

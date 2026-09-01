@@ -1,0 +1,26 @@
+# Optional override: keep the entire workspace on a Windows/host bind mount.
+# Use when you need to inspect jobs/tilesets directly under ./data without a volume.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.host-data.yml up -d --build
+#
+# Also set in .env:
+#   WORKSPACE_DOCKER_VOLUME=
+#   HOST_WORKSPACE_DIR=D:/path/to/ocean-terrain-handler/data
+
+services:
+  api:
+    volumes:
+      - ./data:/data/workspace
+
+  worker:
+    environment:
+      WORKSPACE_DOCKER_VOLUME: ${WORKSPACE_DOCKER_VOLUME:-}
+    volumes:
+      - ./data:/data/workspace
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  terrain-server:
+    volumes:
+      - ./data:/data
+      - ./scripts/preview:/usr/share/nginx/preview:ro
+      - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro

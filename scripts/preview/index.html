@@ -160,7 +160,6 @@
           </div>
           <div class="panel-actions">
             <button type="button" id="lookupJobBtn">查询 / 轮询</button>
-            <button type="button" class="secondary" id="openJobTilesetBtn" disabled>在地图中打开</button>
           </div>
           <div id="jobProgress" class="job-progress" hidden>
             <div class="job-progress-meta">
@@ -181,7 +180,7 @@
           </div>
           <dl id="jobDetail" class="job-detail">
             <dt>说明</dt>
-            <dd>在「数据接入」提交任务后，在此查看进度条、状态、阶段与耗时。</dd>
+            <dd>在「数据接入」提交任务后，在此查看进度条、状态、阶段与耗时。任务完成后请到「瓦片发布」发布，再到「图层管理」加载预览。Redis 过期后仍可按 job_id 查询磁盘归档状态。</dd>
           </dl>
         </div>
       </aside>
@@ -290,6 +289,21 @@
               <button type="button" class="secondary" id="resetVisualizeBtn">清除着色</button>
             </div>
             <div id="visualizeStatus"></div>
+          </div>
+        </section>
+
+        <section class="sidebar-section open" id="sceneSection">
+          <button type="button" class="sidebar-section-header" data-section="scene" aria-expanded="true">
+            <span>场景</span>
+            <span class="section-chevron">▾</span>
+          </button>
+          <div class="sidebar-section-body">
+            <div class="form-row form-checks">
+              <label title="启用太阳光照与地形明暗（Mesh 顶点法线时立体感更明显）">
+                <input type="checkbox" id="optEnableLighting" checked />
+                地形光照
+              </label>
+            </div>
           </div>
         </section>
       </div>

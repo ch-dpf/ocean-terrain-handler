@@ -10,6 +10,7 @@ from app.schemas import (
     PreprocessOptions,
     TerrainJobCreate,
     TerrainJobDetail,
+    TerrainJobResponse,
 )
 
 
@@ -48,6 +49,17 @@ def test_job_progress_and_detail():
     assert detail.progress.percent == 42.5
     assert detail.progress.phase == "ctb_tile"
     assert detail.elapsed_seconds == 12.5
+
+
+def test_terrain_job_response_includes_ws_url():
+    response = TerrainJobResponse(
+        job_id="abc",
+        status="queued",
+        progress_url="/api/v1/terrain/jobs/abc",
+        progress_ws_url="/api/v1/terrain/jobs/abc/ws",
+        message="Job queued",
+    )
+    assert response.progress_ws_url.endswith("/ws")
 
 
 def test_disk_publish_requires_job_or_tiles_dir():

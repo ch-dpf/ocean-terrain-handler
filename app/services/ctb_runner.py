@@ -30,7 +30,32 @@ def format_docker_bind_source(path: Path) -> str:
         drive = text[0].lower()
         rest = text[2:].lstrip("/")
         return f"//{drive}/{rest}" if rest else f"//{drive}"
+    # Already-absolute POSIX paths must not be resolve()'d on Windows hosts
+    # (``Path('/data')`` would become ``D:/data``).
+    if text.startswith("/"):
+        return text
     return str(path.resolve()).replace("\\", "/")
+
+
+def resolve_ctb_volume_source(
+    *,
+    workspace_dir: Path,
+    host_workspace_dir: Path | None = None,
+    workspace_docker_volume: str | None = None,
+) -> str:
+    """Return the left-hand side of ``docker run -v <source>:/data``.
+
+    Prefer a Docker named volume (fast on Docker Desktop). Fall back to a host
+    bind path for local/dev setups that still mount ``./data`` into the worker.
+    """
+    if workspace_docker_volume:
+        name = workspace_docker_volume.strip()
+        if not name:
+            raise ValueError("workspace_docker_volume is empty")
+        if any(sep in name for sep in ("/", "\\", ":")):
+            raise ValueError(f"Invalid workspace_docker_volume name: {name}")
+        return name
+    return format_docker_bind_source(host_workspace_dir or workspace_dir)
 
 
 def build_ctb_command(
@@ -41,6 +66,7 @@ def build_ctb_command(
     workspace_dir: Path,
     gdal_cachemax: int,
     host_workspace_dir: Path | None = None,
+    workspace_docker_volume: str | None = None,
 ) -> list[str]:
     """Build docker run command for ctb-tile."""
     input_rel = input_path.resolve().relative_to(workspace_dir.resolve())
@@ -49,8 +75,12 @@ def build_ctb_command(
     container_input = f"/data/{input_rel.as_posix()}"
     container_output = f"/data/{output_rel.as_posix()}"
 
-    # Host Docker daemon resolves -v paths on the host, not inside the worker.
-    volume_source = format_docker_bind_source(host_workspace_dir or workspace_dir)
+    # Host Docker daemon resolves -v sources on the host (path or volume name).
+    volume_source = resolve_ctb_volume_source(
+        workspace_dir=workspace_dir,
+        host_workspace_dir=host_workspace_dir,
+        workspace_docker_volume=workspace_docker_volume,
+    )
 
     cmd = [
         "docker",
@@ -113,6 +143,7 @@ def run_ctb_tile(
     workspace_dir: Path,
     gdal_cachemax: int,
     host_workspace_dir: Path | None = None,
+    workspace_docker_volume: str | None = None,
     *,
     on_subprogress: Callable[[float, str | None], None] | None = None,
 ) -> None:
@@ -125,6 +156,7 @@ def run_ctb_tile(
         workspace_dir=workspace_dir,
         gdal_cachemax=gdal_cachemax,
         host_workspace_dir=host_workspace_dir,
+        workspace_docker_volume=workspace_docker_volume,
     )
     logger.info("Running CTB: %s", " ".join(cmd))
 

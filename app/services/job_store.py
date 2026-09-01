@@ -1,4 +1,4 @@
-"""Redis-backed job status store."""
+"""Redis-backed job status store with pub/sub progress events."""
 
 import json
 from datetime import UTC, datetime
@@ -15,9 +15,17 @@ class JobStore:
         self._redis = redis.from_url(settings.redis_url, decode_responses=True)
         self._ttl = settings.job_ttl
         self._prefix = "terrain:job:"
+        self._events_prefix = "terrain:job:events:"
 
     def _key(self, job_id: str) -> str:
         return f"{self._prefix}{job_id}"
+
+    def events_channel(self, job_id: str) -> str:
+        """Redis pub/sub channel for live job progress updates."""
+        return f"{self._events_prefix}{job_id}"
+
+    def _publish(self, job_id: str, data: dict[str, Any]) -> None:
+        self._redis.publish(self.events_channel(job_id), json.dumps(data))
 
     def create(self, job_id: str, payload: dict[str, Any]) -> None:
         now = datetime.now(UTC).isoformat()
@@ -38,6 +46,7 @@ class JobStore:
             **payload,
         }
         self._redis.setex(self._key(job_id), self._ttl, json.dumps(data))
+        self._publish(job_id, data)
 
     def update(self, job_id: str, **fields: Any) -> None:
         data = self.get(job_id)
@@ -46,6 +55,7 @@ class JobStore:
         data.update(fields)
         data["updated_at"] = datetime.now(UTC).isoformat()
         self._redis.setex(self._key(job_id), self._ttl, json.dumps(data))
+        self._publish(job_id, data)
 
     def get(self, job_id: str) -> dict[str, Any] | None:
         raw = self._redis.get(self._key(job_id))

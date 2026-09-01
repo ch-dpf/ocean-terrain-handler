@@ -74,6 +74,25 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
+默认将 `jobs` / `tilesets` / `uploads` 放在 Docker **命名卷**（Linux FS，加快瓦片读写）；**`source/`（DEM）仍绑在宿主机 `./data/source`**，避免大 DEM 挤占 Docker 默认所在的 C: 虚拟盘。
+
+若本机已有历史 `jobs/tilesets/uploads`，可迁入卷：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\migrate-data-to-volume.ps1
+docker compose up -d --build
+```
+
+补充 DEM 请直接放到 `.\data\source\`（不要整目录进命名卷，除非已把 Docker 数据盘迁到非 C: 盘）。
+
+需要回到「整个 `./data` 都在宿主机」的旧模式时：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.host-data.yml up -d --build
+```
+
+并在 `.env` 中清空 `WORKSPACE_DOCKER_VOLUME`，设置 `HOST_WORKSPACE_DIR`（Windows 例：`D:/workspace/ocean-terrain-handler/data`）。
+
 服务地址：
 
 | 服务 | URL |
@@ -86,19 +105,19 @@ docker compose up -d --build
 预览页支持侧边栏：数据接入、进度查询、瓦片发布、图层管理。URL 参数：
 
 - `?tileset={name}` — 加载已发布地形
-- `?job={job_id}` — 打开进度面板并轮询
+- `?job={job_id}` — 打开进度面板并订阅进度（WebSocket，失败时回退轮询）
 - `?lon=&lat=&height=` — 手动设置相机
 - `?exaggeration=N` — 垂直夸大（调试用，默认 1.0 真实比例）
 
 ### 提交任务（quantized-mesh 示例）
 
-将 DEM 放入 `./data/` 目录后：
+将 DEM 放入 `./data/source/` 目录后：
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/terrain/jobs \
   -H "Content-Type: application/json" \
   -d '{
-    "input_path": "/data/workspace/dem.tif",
+    "input_path": "/data/workspace/source/dem.tif",
     "preprocess": {
       "target_crs": "EPSG:4326",
       "fill_nodata": true,
@@ -128,14 +147,25 @@ curl -X POST http://localhost:8000/api/v1/terrain/jobs/upload \
 ### 查询任务状态
 
 ```bash
+# REST 快照（保留；重连/调试/非浏览器客户端可用）
 curl http://localhost:8000/api/v1/terrain/jobs/{job_id}
 ```
 
 任务状态：`queued` → `preprocessing` → `tiling` → `publishing` → `completed` / `failed`
 
-查询响应含量化进度字段 `progress`（`percent` 0–100、`phase`、`message`，切片阶段可含 zoom），以及处理耗时字段 `created_at` / `completed_at` / `elapsed_seconds`。预览页「进度查询」仅展示进度条、状态、阶段与耗时。
+查询响应含量化进度字段 `progress`（`percent` 0–100、`phase`、`message`，切片阶段可含 zoom），以及处理耗时字段 `created_at` / `completed_at` / `elapsed_seconds`。
 
-输出目录：`./data/jobs/{job_id}/tiles/`  
+若 Redis 中的任务记录已按 `JOB_TTL` 过期，查询会回退读取磁盘上的 `jobs/{job_id}/manifest.json`（无 manifest 时若已有 `tiles/` 产物则按已完成快照返回）。WebSocket 在仅磁盘快照可用时发送一次终态/静态快照后关闭。
+
+实时进度通过 WebSocket 推送（与 REST 同结构的 `TerrainJobDetail` JSON）：
+
+```text
+ws://localhost:8000/api/v1/terrain/jobs/{job_id}/ws
+```
+
+连接后立即收到当前快照，随后为增量更新；`completed` / `failed` 后关闭连接。创建任务响应同时返回 `progress_url` 与 `progress_ws_url`。预览页优先使用 WebSocket，不可用时回退到 2s 轮询。
+
+输出目录（命名卷内）：`/data/workspace/jobs/{job_id}/tiles/`  
 发布 URL：`http://localhost:8103/tilesets/{job_id}/`（默认不自动发布，见 `publish.auto_publish` / `AUTO_PUBLISH`）
 
 ### 查询已发布 tileset
@@ -145,6 +175,8 @@ curl http://localhost:8000/api/v1/terrain/tilesets
 ```
 
 响应中每个 tileset 含 `name`、`terrain_url`，以及从 `layer.json` 解析的 `format` / `format_label`、`projection` / `crs`、`min_zoom` / `max_zoom`（无元数据时为 `null`）。预览页「图层管理」以标签展示格式、坐标系与层级。
+
+列表接口优先读取发布目录旁路文件 `data/tilesets/terrain/.{name}.layer-meta.json`（发布时写入，并带进程内缓存），避免每次跟随 symlink 进入大型瓦片树。
 
 ### 发布 / 下架
 
@@ -272,7 +304,8 @@ ocean-terrain-handler/
 |------|------|------|
 | `REDIS_URL` | `redis://redis:6379/0` | Redis 连接 |
 | `WORKSPACE_DIR` | `/data/workspace` | 工作目录 |
-| `HOST_WORKSPACE_DIR` | — | 宿主机上 `./data` 的绝对路径（Worker 经 docker.sock 调 CTB 时用于 `-v`；Windows 例：`D:/workspace/ocean-terrain-handler/data`） |
+| `WORKSPACE_DOCKER_VOLUME` | `ocean-terrain-handler_workspace_data` | CTB 使用的 Docker 命名卷（Docker Desktop 推荐）；与 `HOST_WORKSPACE_DIR` 二选一 |
+| `HOST_WORKSPACE_DIR` | — | 宿主机 `./data` 绝对路径（仅 host-data 模式；Windows 例：`D:/workspace/ocean-terrain-handler/data`） |
 | `CTB_DOCKER_IMAGE` | `cesium-terrain-builder:local` | 本地自构建 CTB 镜像名 |
 | `GDAL_CACHEMAX` | `512` | GDAL 缓存 (MB) |
 | `JOB_TTL` | `604800` | 任务状态保留 (秒) |
@@ -288,7 +321,8 @@ ocean-terrain-handler/
 - NODATA 必须在切片前填充，否则 CTB 无法正确处理
 - 大文件建议设置 `start_zoom` / `end_zoom` 分级切片，避免低级别 zoom 溢出
 - Worker 容器需挂载 `/var/run/docker.sock` 以调用宿主机上的 CTB 镜像
-- `data/tilesets/terrain/` 目录必须存在，API 启动时会自动创建
+- 默认 `jobs/tilesets/uploads` 用命名卷，`source/` 仍在宿主机 `./data/source`；历史产物可用 `scripts/migrate-data-to-volume.ps1` 迁入卷
+- `data/tilesets/terrain/`（卷内）在 API 启动时会自动创建
 - 发布通过符号链接注册瓦片，Worker 容器需有创建 symlink 的权限
 - 预览页通过 Cesium CDN 加载（需联网）；地形瓦片由 nginx 本地提供
 
