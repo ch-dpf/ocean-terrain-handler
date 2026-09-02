@@ -1,13 +1,11 @@
 FROM python:3.12-slim-bookworm
 
-# g++/python headers/zlib: Cython CTB meshing+encode extension.
-# docker.io: fallback to host-daemon ctb-tile via /var/run/docker.sock.
+# g++/python headers/zlib: Cython CTB meshing+encode extension (build-time only).
 # libgomp1/libglib: opencv-python-headless.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     python3-dev \
     zlib1g-dev \
-    docker.io \
     libgomp1 \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*

@@ -307,7 +307,7 @@ def run_ctb_tile(
     on_subprogress: ProgressCallback | None = None,
     **_ignored: object,
 ) -> None:
-    """Python CTB-compatible tiler. Extra kwargs are ignored (legacy Docker args)."""
+    """In-process CTB tiler: Python scheduling/I/O, C++ meshing/encoding when built."""
     output_dir.mkdir(parents=True, exist_ok=True)
     grid = grid_for_profile(options.profile, options.tile_size)
     mb = gdal_cachemax if gdal_cachemax is not None else 512

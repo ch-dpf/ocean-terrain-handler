@@ -1,12 +1,8 @@
-"""Mesh + encode facade: Cython/C++ when available, Python reference otherwise."""
+"""Mesh + encode facade: Cython/C++ when built, Python reference otherwise."""
 
 from __future__ import annotations
 
-from functools import lru_cache
-import gzip
 import logging
-import struct
-import time
 from typing import Mapping
 
 import numpy as np
@@ -16,9 +12,6 @@ from app.services.ctb.heightfield import HeightField, MeshBuilder
 
 logger = logging.getLogger(__name__)
 
-# One 65×65 mesh+gzip must finish within this budget or native is treated as unusable.
-NATIVE_TILE_BUDGET_S = 0.1
-
 _native_module = None
 _native_import_error: str | None = None
 try:
@@ -26,6 +19,14 @@ try:
 except Exception as exc:  # pragma: no cover - depends on local compile
     _native_import_error = str(exc)
     _native_module = None
+
+if _native_module is not None:
+    logger.info("CTB meshing/encoding: Cython/C++ extension")
+else:
+    logger.warning(
+        "CTB meshing/encoding: Python reference (%s). Build with: python setup.py build_ext --inplace",
+        _native_import_error or "extension not built",
+    )
 
 
 def native_available() -> bool:
@@ -124,41 +125,3 @@ def encode_heightmap_tile_bytes(
             raise RuntimeError("CTB native extension is not available")
         return _native_module.encode_heightmap_tile_bytes(heights, int(children))
     return encode_heightmap(heights, children)
-
-
-@lru_cache(maxsize=1)
-def native_meets_bar() -> tuple[bool, str]:
-    """Functional + latency gate for the C++ meshing/encoding path."""
-    if _native_module is None:
-        return False, _native_import_error or "native extension not built"
-    size = 65
-    heights = np.linspace(0.0, 120.0, size * size, dtype=np.float32).reshape(size, size)
-    started = time.perf_counter()
-    try:
-        blob = encode_mesh_tile_bytes(
-            heights,
-            -180.0,
-            -90.0,
-            0.0,
-            90.0,
-            1.0,
-            True,
-            None,
-            True,
-            use_native=True,
-        )
-    except Exception as exc:
-        return False, f"native encode failed: {exc}"
-    elapsed = time.perf_counter() - started
-    if blob[:2] != b"\x1f\x8b":
-        return False, "native output is not gzip"
-    try:
-        raw = gzip.decompress(blob)
-        vertex_count = struct.unpack_from("<i", raw, 88)[0]
-    except Exception as exc:
-        return False, f"native gzip/mesh header invalid: {exc}"
-    if vertex_count <= 0:
-        return False, "native mesh has no vertices"
-    if elapsed > NATIVE_TILE_BUDGET_S:
-        return False, f"native mesh+encode {elapsed:.3f}s exceeds {NATIVE_TILE_BUDGET_S:.3f}s"
-    return True, f"native mesh+encode {elapsed:.4f}s vertices={vertex_count}"

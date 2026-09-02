@@ -5,5 +5,5 @@ Algorithms, constants, and tile layout are ported from
 Apache-2.0, GeoData / Alvaro Huarte.
 
 Python schedules tiles and reads rasters; meshing and encoding run in the
-Cython/C++ extension when it meets the functional/performance bar.
+Cython/C++ extension when it is built. No Docker ``ctb-tile`` sidecar.
 """
