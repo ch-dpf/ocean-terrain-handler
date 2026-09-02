@@ -53,6 +53,7 @@ def encode_mesh_tile_bytes(
     object neighbor_bottom,
     bint write_vertex_normals,
 ):
+    """Return uncompressed quantized-mesh bytes. Caller gzip-compresses with stdlib."""
     cdef object grid = np.ascontiguousarray(heights, dtype=np.float32)
     if grid.ndim != 2 or grid.shape[0] != grid.shape[1]:
         raise ValueError("heightfield must be a square 2D array")

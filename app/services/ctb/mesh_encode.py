@@ -7,7 +7,7 @@ from typing import Mapping
 
 import numpy as np
 
-from app.services.ctb.encode import encode_heightmap, encode_quantized_mesh
+from app.services.ctb.encode import encode_heightmap, encode_quantized_mesh, gzip_terrain
 from app.services.ctb.heightfield import HeightField, MeshBuilder
 
 logger = logging.getLogger(__name__)
@@ -86,7 +86,7 @@ def encode_mesh_tile_bytes(
         if _native_module is None:
             raise RuntimeError("CTB native extension is not available")
         mapping = neighbors or {}
-        return _native_module.encode_mesh_tile_bytes(
+        raw = _native_module.encode_mesh_tile_bytes(
             heights,
             minx,
             miny,
@@ -100,6 +100,7 @@ def encode_mesh_tile_bytes(
             mapping.get(3),
             write_vertex_normals,
         )
+        return gzip_terrain(raw)
     return _python_mesh_encode(
         heights,
         minx,
@@ -123,5 +124,5 @@ def encode_heightmap_tile_bytes(
     if prefer_native:
         if _native_module is None:
             raise RuntimeError("CTB native extension is not available")
-        return _native_module.encode_heightmap_tile_bytes(heights, int(children))
+        return gzip_terrain(_native_module.encode_heightmap_tile_bytes(heights, int(children)))
     return encode_heightmap(heights, children)

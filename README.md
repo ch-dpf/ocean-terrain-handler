@@ -41,10 +41,10 @@
 - 高程采样时的 terrain 规格 1 像素西/北重叠（Python warp / I/O）
 - Chunked LOD + Lindstrom–Koller BTT（`HeightFieldChunker`），几何误差 `2πR × 0.25 × mesh_qfactor / (tileWidth × tilesAtL0) / 2^z`（C++）
 - zoom ≤ 6 的 CTB `smoothSmallZooms` 格网加密；zoom > 6 的邻接边激活缝合
-- quantized-mesh-1.0（ECEF、包围球、地平遮挡点、zigzag、边索引、oct 法线）与 heightmap-1.0（C++ 编码 + gzip）
+- quantized-mesh-1.0（ECEF、包围球、地平遮挡点、zigzag、边索引、oct 法线）与 heightmap-1.0（C++ 编码；gzip 用 Python 标准库）
 - `-C` CesiumJS 缺根瓦片补齐
 
-栅格采进瓦片使用本库 Python warp（精确反算；`error_threshold` 仅为兼容 CTB 选项，不做 GDAL 近似变换）。镜像构建时编译 Cython 扩展；未编译时同一套 Python 参考实现仍可跑（便于无编译器的本机开发），不引入 `ctb-tile` 或 `docker.sock`。
+栅格采进瓦片使用本库 Python warp（精确反算；`error_threshold` 仅为兼容 CTB 选项，不做 GDAL 近似变换）。C++ 扩展是标准 C++17，不链系统 zlib；`setup.py` 按 MSVC / gcc / clang 选编译参数。镜像构建时编译；本机 Win/macOS/Linux 有编译器时 `python setup.py build_ext --inplace` 同样得到 C++ 快路径。未编译时走同一套 Python 参考实现，不引入 `ctb-tile` 或 `docker.sock`。
 
 | `output_format` | layer.json format | 说明 |
 |-----------------|-------------------|------|
@@ -258,7 +258,7 @@ uvicorn app.main:app --reload --port 8000
 celery -A app.worker.celery_app worker --loglevel=info
 ```
 
-Worker 镜像基于 `python:3.12-slim`，预处理为自研 Python 栅格引擎，切片为进程内 CTB（C++ meshing/编码）。不调用 GDAL 命令行，也不通过 `docker.sock` 启动 `ctb-tile`。本地开发需 Python 3.11+；可选 `python setup.py build_ext --inplace` 以启用 C++ 扩展。
+Worker 镜像基于 `python:3.12-slim`，预处理为自研 Python 栅格引擎，切片为进程内 CTB（C++ meshing/编码，gzip 用标准库）。不调用 GDAL 命令行，也不通过 `docker.sock` 启动 `ctb-tile`。本机启用 C++ 快路径：Linux/`g++`、macOS/`clang`、Windows/MSVC Build Tools 后执行 `python setup.py build_ext --inplace`。
 
 预览与瓦片发布需单独启动 nginx（或使用 `docker compose up terrain-server`）。
 

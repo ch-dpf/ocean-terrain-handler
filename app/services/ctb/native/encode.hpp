@@ -4,14 +4,12 @@
 
 #include <cmath>
 #include <cstdint>
-#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
-#include <zlib.h>
 
 namespace ctb_native {
 
@@ -22,7 +20,6 @@ constexpr double kWgs84E2 = 0.0066943799901975848;
 constexpr double kShortMax = 32767.0;
 constexpr int kByteSplit = 65636;
 constexpr int kExtensionOctVertexNormals = 1;
-constexpr int kGzipCompressLevel = 6;
 constexpr double kHeightmapOffsetM = 1000.0;
 constexpr double kHeightmapScale = 5.0;
 
@@ -277,23 +274,8 @@ inline void write_le(std::vector<std::uint8_t>& buf, T value) {
     buf.insert(buf.end(), raw, raw + sizeof(T));
 }
 
-inline std::string gzip_compress(const std::vector<std::uint8_t>& data) {
-    z_stream strm{};
-    if (deflateInit2(&strm, kGzipCompressLevel, Z_DEFLATED, 16 + MAX_WBITS, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
-        throw std::runtime_error("gzip deflateInit2 failed");
-    }
-    strm.next_in = const_cast<Bytef*>(reinterpret_cast<const Bytef*>(data.data()));
-    strm.avail_in = static_cast<uInt>(data.size());
-    std::vector<std::uint8_t> out(deflateBound(&strm, static_cast<uLong>(data.size())) + 32);
-    strm.next_out = reinterpret_cast<Bytef*>(out.data());
-    strm.avail_out = static_cast<uInt>(out.size());
-    const int ret = deflate(&strm, Z_FINISH);
-    const std::size_t produced = static_cast<std::size_t>(strm.total_out);
-    deflateEnd(&strm);
-    if (ret != Z_STREAM_END) {
-        throw std::runtime_error("gzip deflate failed");
-    }
-    return std::string(reinterpret_cast<const char*>(out.data()), produced);
+inline std::string as_string(const std::vector<std::uint8_t>& data) {
+    return std::string(reinterpret_cast<const char*>(data.data()), data.size());
 }
 
 inline void write_edge_indices(
@@ -452,7 +434,7 @@ inline std::string encode_quantized_mesh(
             write_le<std::uint8_t>(buf, static_cast<std::uint8_t>(encoded.second));
         }
     }
-    return gzip_compress(buf);
+    return as_string(buf);
 }
 
 inline std::string encode_heightmap(const float* heights, int count, int children) {
@@ -465,7 +447,7 @@ inline std::string encode_heightmap(const float* heights, int count, int childre
     }
     buf.push_back(static_cast<std::uint8_t>(children & 0xFF));
     buf.push_back(0);
-    return gzip_compress(buf);
+    return as_string(buf);
 }
 
 }  // namespace ctb_native
