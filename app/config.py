@@ -22,7 +22,14 @@ class Settings(BaseSettings):
     celery_result_backend: str = "redis://localhost:6379/1"
 
     workspace_dir: Path = Path("/data/workspace")
-    # Raster tile-decode cache (MB) for the Python raster engine and CTB tiler.
+    # Host path for docker -v when worker falls back to CTB via docker.sock.
+    host_workspace_dir: Path | None = None
+    # Docker named volume that backs workspace_dir (e.g. ocean-terrain-handler_workspace_data).
+    workspace_docker_volume: str | None = None
+    ctb_docker_image: str = "cesium-terrain-builder:local"
+    # auto: native C++ meshing/encoding when it meets the bar, else docker ctb-tile.
+    ctb_backend: str = "auto"
+    # Raster tile-decode cache (MB) for the Python engine; also passed to CTB as GDAL_CACHEMAX.
     gdal_cachemax: int = 512
     job_ttl: int = 604800
 

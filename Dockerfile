@@ -1,18 +1,25 @@
 FROM python:3.12-slim-bookworm
 
-# libgomp1/libglib are needed by opencv-python-headless.
+# g++/python headers/zlib: Cython CTB meshing+encode extension.
+# docker.io: fallback to host-daemon ctb-tile via /var/run/docker.sock.
+# libgomp1/libglib: opencv-python-headless.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    python3-dev \
+    zlib1g-dev \
+    docker.io \
     libgomp1 \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip3 install --no-cache-dir -r requirements.txt
+COPY requirements.txt pyproject.toml setup.py ./
+RUN pip3 install --no-cache-dir -r requirements.txt cython
 
 COPY app ./app
-COPY pyproject.toml .
+RUN python3 setup.py build_ext --inplace \
+    && rm -rf build
 
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app

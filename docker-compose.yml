@@ -26,9 +26,13 @@ services:
     command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=2
     env_file:
       - .env
+    environment:
+      # Prefer named-volume mount for CTB (docker.sock); overrides host bind when set.
+      WORKSPACE_DOCKER_VOLUME: ${WORKSPACE_DOCKER_VOLUME:-ocean-terrain-handler_workspace_data}
     volumes:
       - workspace_data:/data/workspace
       - ./data/source:/data/workspace/source
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       - redis
 
@@ -50,5 +54,5 @@ services:
 volumes:
   redis_data:
   workspace_data:
-    # Stable name so migrate scripts can reference it.
+    # Stable name so CTB / migrate scripts can reference it.
     name: ocean-terrain-handler_workspace_data

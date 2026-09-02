@@ -13,5 +13,8 @@ venv/
 .ruff_cache/
 data/
 *.log
+*.so
+*.pyd
+app/services/ctb/native/_ctb_core.cpp
 .idea/
 .vscode/

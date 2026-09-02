@@ -20,7 +20,7 @@ from app.services.ctb.constants import (
     SEMI_MAJOR_AXIS,
     SMOOTH_SMALL_ZOOM_MAX,
 )
-from app.services.ctb.encode import child_flags, encode_heightmap, encode_quantized_mesh
+from app.services.ctb.encode import child_flags
 from app.services.ctb.grid import (
     CRSBounds,
     Grid,
@@ -29,7 +29,7 @@ from app.services.ctb.grid import (
     iter_tile_coordinates,
     neighbor_coord,
 )
-from app.services.ctb.heightfield import HeightField, MeshBuilder
+from app.services.ctb.mesh_encode import encode_heightmap_tile_bytes, encode_mesh_tile_bytes
 from app.services.ctb.sample import (
     dataset_bounds_in_grid_crs,
     dataset_resolution,
@@ -178,34 +178,6 @@ def _write_layer_json(
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
-def _build_mesh_tile(
-    heights: np.ndarray,
-    grid: Grid,
-    coord: TileCoordinate,
-    dataset_bounds: CRSBounds,
-    max_zoom: int,
-    mesh_qfactor: float,
-    neighbor_heights: dict[int, np.ndarray],
-) -> tuple[list[tuple[float, float, float]], list[int], int]:
-    tile_size = grid.tile_size
-    error = geometric_error_for_zoom(grid, coord.zoom, tile_size, mesh_qfactor)
-    field = HeightField(heights)
-    field.apply_geometric_error(error, coord.zoom <= SMOOTH_SMALL_ZOOM_MAX)
-    if coord.zoom > SMOOTH_SMALL_ZOOM_MAX:
-        for border in range(4):
-            neighbor = neighbor_heights.get(border)
-            if neighbor is None:
-                continue
-            other = HeightField(neighbor)
-            other.apply_geometric_error(error, False)
-            field.apply_border_activation_state(other, border)
-    bounds = grid.tile_bounds(coord)
-    mesh = MeshBuilder(bounds.minx, bounds.miny, bounds.maxx, bounds.maxy, tile_size)
-    field.generate_mesh(mesh, 0)
-    flags = child_flags(dataset_bounds, bounds, is_max_zoom=coord.zoom == max_zoom)
-    return mesh.vertices, mesh.indices, flags
-
-
 def _neighbor_heights(
     src: GeoTiffReader,
     grid: Grid,
@@ -236,26 +208,28 @@ def _encode_tile(
     heights = sample_tile_heights(src, grid, coord, resampling)
     if options.output_format == OutputFormat.TERRAIN:
         flags = child_flags(dataset_bounds, grid.tile_bounds(coord), is_max_zoom=coord.zoom == max_zoom)
-        return encode_heightmap(heights, flags)
+        return encode_heightmap_tile_bytes(heights, flags)
     neighbors: dict[int, np.ndarray] = {}
     if coord.zoom > SMOOTH_SMALL_ZOOM_MAX:
         neighbors = _neighbor_heights(src, grid, coord, dataset_bounds, resampling)
-    vertices, indices, _flags = _build_mesh_tile(
-        heights,
-        grid,
-        coord,
-        dataset_bounds,
-        max_zoom,
-        options.mesh_qfactor,
-        neighbors,
-    )
-    if not vertices:
-        raise CtbError(f"Mesh generation produced no vertices for {coord.zoom}/{coord.x}/{coord.y}")
-    return encode_quantized_mesh(
-        vertices,
-        indices,
-        write_vertex_normals=options.vertex_normals and options.output_format == OutputFormat.MESH,
-    )
+    bounds = grid.tile_bounds(coord)
+    error = geometric_error_for_zoom(grid, coord.zoom, grid.tile_size, options.mesh_qfactor)
+    try:
+        return encode_mesh_tile_bytes(
+            heights,
+            bounds.minx,
+            bounds.miny,
+            bounds.maxx,
+            bounds.maxy,
+            error,
+            coord.zoom <= SMOOTH_SMALL_ZOOM_MAX,
+            neighbors,
+            options.vertex_normals and options.output_format == OutputFormat.MESH,
+        )
+    except Exception as exc:
+        raise CtbError(
+            f"Mesh generation failed for {coord.zoom}/{coord.x}/{coord.y}: {exc}"
+        ) from exc
 
 
 def _create_empty_root_tile(
