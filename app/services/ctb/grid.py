@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 from pyproj import CRS
 
+from app.schemas import Profile
 from app.services.ctb.constants import (
     GEODETIC_DEFAULT_TILE_SIZE,
     MERCATOR_DEFAULT_TILE_SIZE,
-    SEMI_MAJOR_AXIS,
     WEB_MERCATOR_ORIGIN,
 )
-from app.schemas import Profile
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,11 +132,9 @@ class Grid:
 
     def zoom_for_resolution(self, resolution: float) -> int:
         # Grid.hpp: ceil(log(init)/log(z) - log(res)/log(z))
-        return int(
-            math.ceil(
-                (math.log(self.initial_resolution) / math.log(self.zoom_factor))
-                - (math.log(resolution) / math.log(self.zoom_factor))
-            )
+        return math.ceil(
+            (math.log(self.initial_resolution) / math.log(self.zoom_factor))
+            - (math.log(resolution) / math.log(self.zoom_factor))
         )
 
     def pixels_to_crs(self, pixel_x: float, pixel_y: float, zoom: int) -> tuple[float, float]:
@@ -230,14 +228,28 @@ def iter_tile_coordinates(
     extent: CRSBounds,
     start_zoom: int,
     end_zoom: int,
-) -> list[TileCoordinate]:
+) -> Iterator[TileCoordinate]:
     """GridIterator.hpp: zoom high→low, x west→east, y south→north."""
     if start_zoom < end_zoom:
         raise ValueError("start_zoom must be >= end_zoom")
-    tiles: list[TileCoordinate] = []
     for zoom in range(start_zoom, end_zoom - 1, -1):
         bounds = grid.tiles_for_extent(extent, zoom)
         for x in range(bounds.minx, bounds.maxx + 1):
             for y in range(bounds.miny, bounds.maxy + 1):
-                tiles.append(TileCoordinate(zoom, x, y))
-    return tiles
+                yield TileCoordinate(zoom, x, y)
+
+
+def tile_coordinate_count(
+    grid: Grid,
+    extent: CRSBounds,
+    start_zoom: int,
+    end_zoom: int,
+) -> int:
+    """Count the same coordinates without materializing the tile list."""
+    if start_zoom < end_zoom:
+        raise ValueError("start_zoom must be >= end_zoom")
+    total = 0
+    for zoom in range(start_zoom, end_zoom - 1, -1):
+        bounds = grid.tiles_for_extent(extent, zoom)
+        total += (bounds.maxx - bounds.minx + 1) * (bounds.maxy - bounds.miny + 1)
+    return total

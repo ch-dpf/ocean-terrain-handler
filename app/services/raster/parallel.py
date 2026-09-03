@@ -23,16 +23,15 @@ def ordered_parallel_map(
     workers: int,
 ) -> Iterator[R]:
     """Apply ``fn`` with a thread pool, yielding results in input order."""
-    sequence = items if isinstance(items, list) else list(items)
-    if workers <= 1 or len(sequence) <= 1:
-        for item in sequence:
+    if workers <= 1:
+        for item in items:
             yield fn(item)
         return
 
     workers = max(1, int(workers))
     prefetch = max(workers * 2, workers)
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        iterator = iter(sequence)
+        iterator = iter(items)
         pending: deque = deque()
 
         def _refill() -> None:
@@ -56,15 +55,32 @@ def unordered_parallel_map(
     *,
     workers: int,
 ) -> Iterator[R]:
-    sequence = items if isinstance(items, list) else list(items)
-    if workers <= 1 or len(sequence) <= 1:
-        for item in sequence:
+    if workers <= 1:
+        for item in items:
             yield fn(item)
         return
-    with ThreadPoolExecutor(max_workers=max(1, int(workers))) as pool:
-        futures = [pool.submit(fn, item) for item in sequence]
-        for fut in as_completed(futures):
-            yield fut.result()
+    workers = max(1, int(workers))
+    prefetch = max(workers * 4, workers)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        iterator = iter(items)
+        inflight: set = set()
+
+        def _submit() -> bool:
+            try:
+                item = next(iterator)
+            except StopIteration:
+                return False
+            inflight.add(pool.submit(fn, item))
+            return True
+
+        while len(inflight) < prefetch and _submit():
+            pass
+        while inflight:
+            for future in as_completed(tuple(inflight)):
+                inflight.remove(future)
+                yield future.result()
+                _submit()
+                break
 
 
 def run_unordered(
@@ -75,9 +91,8 @@ def run_unordered(
     on_done: Callable[[], None] | None = None,
 ) -> None:
     """Apply ``fn`` with a bounded thread pool; completion order is undefined."""
-    sequence = items if isinstance(items, list) else list(items)
-    if workers <= 1 or len(sequence) <= 1:
-        for item in sequence:
+    if workers <= 1:
+        for item in items:
             fn(item)
             if on_done is not None:
                 on_done()
@@ -86,7 +101,7 @@ def run_unordered(
     workers = max(1, int(workers))
     prefetch = max(workers * 4, workers)
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        iterator = iter(sequence)
+        iterator = iter(items)
         inflight: set = set()
 
         def _submit() -> bool:

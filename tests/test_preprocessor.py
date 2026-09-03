@@ -6,11 +6,16 @@ import numpy as np
 import pytest
 
 from app.schemas import PreprocessOptions
+from app.services.byte_progress import overview_bytes, raster_bytes
+from app.services.ctb.mesh_encode import native_available
 from app.services.preprocessor import PreprocessError, gdal_info, preprocess_dem
 from app.services.raster.geotiff import GeoTiffReader
 from app.services.raster.nodata import nodata_mask
-from app.services.byte_progress import overview_bytes, raster_bytes
 from tests.raster_fixtures import write_dem_geotiff_4326
+
+_SKIP_WITHOUT_NATIVE = pytest.mark.skipif(
+    not native_available(), reason="CTB native extension not built"
+)
 
 
 def test_gdal_info_text_contains_size(tmp_path: Path):
@@ -26,6 +31,7 @@ def test_gdal_info_rejects_missing_file(tmp_path: Path):
         gdal_info(tmp_path / "missing.tif")
 
 
+@_SKIP_WITHOUT_NATIVE
 def test_preprocess_reprojects_fills_and_adds_overviews(tmp_path: Path):
     source = write_dem_geotiff_4326(
         tmp_path / "src.tif",
@@ -78,6 +84,7 @@ def test_preprocess_reprojects_fills_and_adds_overviews(tmp_path: Path):
         assert 2 in dst.overview_scales
 
 
+@_SKIP_WITHOUT_NATIVE
 def test_preprocess_reprojects_to_3857(tmp_path: Path):
     source = write_dem_geotiff_4326(tmp_path / "src.tif", width=24, height=24)
     output = preprocess_dem(

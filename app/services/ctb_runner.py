@@ -1,4 +1,4 @@
-"""Invoke cesium-terrain-builder via Docker."""
+"""In-process CTB-compatible terrain tiling (Python I/O + C++ mesh/encode)."""
 
 import logging
 import subprocess

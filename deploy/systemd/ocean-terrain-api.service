@@ -1,0 +1,22 @@
+[Unit]
+Description=Ocean Terrain Handler API
+After=network-online.target redis-server.service
+Wants=network-online.target redis-server.service
+
+[Service]
+Type=simple
+User=ocean-terrain
+Group=ocean-terrain
+WorkingDirectory=/var/lib/ocean-terrain-handler
+EnvironmentFile=/etc/ocean-terrain-handler/env
+ExecStartPre=/opt/ocean-terrain-handler/.venv/bin/python -m app.services.ctb.native_check
+ExecStart=/opt/ocean-terrain-handler/.venv/bin/ocean-terrain-api
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0027
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

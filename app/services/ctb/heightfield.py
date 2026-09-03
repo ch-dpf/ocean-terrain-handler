@@ -88,6 +88,9 @@ class HeightField:
         if heights.ndim != 2 or heights.shape[0] != heights.shape[1]:
             raise ValueError("heightfield must be a square 2D array")
         self.size = int(heights.shape[0])
+        edge = self.size - 1
+        if self.size < 3 or edge & (edge - 1):
+            raise ValueError("heightfield size must be 2^n + 1")
         self.heights = np.asarray(heights, dtype=np.float32)
         self.log_size = int(math.log2(float(self.size) - 1) + 0.5)
         self.levels = np.full((self.size, self.size), 255, dtype=np.uint8)

@@ -1,13 +1,13 @@
 # Ocean Terrain Handler
 
-通用地形 GeoTIFF 预处理与 Cesium 地形瓦片切片服务。基于 **FastAPI + Celery + Redis** 与自研 Python 栅格引擎（`tifffile` / `pyproj` / `numpy`）做 DEM 预处理；切片阶段通过 Docker 调用本地自构建的 [cesium-terrain-builder](https://github.com/ahuarte47/cesium-terrain-builder)（`master-quantized-mesh` 分支）`ctb-tile`（quantized-mesh / heightmap）。`app/services/ctb/` 下的 Python 移植保留供后续优化，当前运行时未启用。
+通用地形 GeoTIFF 预处理与 Cesium 地形瓦片切片服务。基于 **FastAPI + Celery + Redis** 与窗口化 Python 栅格 I/O（`tifffile` / `pyproj` / `numpy`）。切片协议与算法对齐 [cesium-terrain-builder](https://github.com/ch-dpf/cesium-terrain-builder/tree/master-quantized-mesh-adaptation)：Python 负责调度与 I/O，随平台 wheel 交付的 Cython/C++ 扩展负责重采样、BTT meshing 与 quantized-mesh/heightmap 编码。运行时不依赖 GDAL CLI、系统 CTB、编译器或 Docker socket。
 
 ## 架构
 
 ```
 客户端 → FastAPI → Redis 队列 → Celery Worker
                                     ├─ 自研 Python 栅格预处理 (reproject / fill-nodata / overview)
-                                    ├─ ctb-tile (本地 Docker 镜像) → 瓦片输出
+                                    ├─ CTB 切片：Python 调度/I/O + C++ 重采样/meshing/编码
                                     └─ 注册 tileset → data/tilesets/terrain/
 
 浏览器 / Cesium 客户端 → nginx terrain-server :8103
@@ -19,7 +19,7 @@
 | 组件 | 职责 |
 |------|------|
 | API | 接收任务、文件上传、查询状态、发布管理 |
-| Worker | Python 栅格预处理 + Docker CTB 切片 + 注册发布 |
+| Worker | Python 栅格预处理 + 进程内 CTB 切片（原生热路径）+ 注册发布 |
 | Redis | 任务队列与状态存储 |
 | terrain-server (nginx) | 地形瓦片 HTTP 发布 + Cesium 预览页 + API 反代 |
 | 工作目录 | 输入 DEM、中间产物、瓦片输出、发布注册 |
@@ -30,33 +30,38 @@
 2. **投影** — 重投影为 EPSG:4326（geodetic 推荐）
 3. **NODATA 填充** — 四方向反距离加权填充（CTB 不处理空值，必须预处理）
 4. **概览图** — 构建 2/4/8/16 金字塔，加速大文件切片
-5. **切片** — `ctb-tile`（Docker）生成 `{z}/{x}/{y}.terrain`
+5. **切片** — 进程内生成 `{z}/{x}/{y}.terrain`（C++ 重采样、meshing、编码）
 6. **发布** — 生成/校验 `layer.json`，注册到 `data/tilesets/terrain/{name}`，由 nginx 对外服务
 
-## CTB 镜像（本地自构建）
+## 地形切片（CTB 协议 / C++ meshing）
 
-本服务使用**本地自构建**的 CTB 镜像，而非 Docker Hub 上的 `homme/cesium-terrain-builder`（该远程镜像已停止维护 8 年以上，仅支持 `heightmap-1.0`，不支持 quantized-mesh）。
+切片算法、常量和规则对齐 `ahuarte47/cesium-terrain-builder` 的 `master-quantized-mesh` 分支（Apache-2.0）：
 
-本地镜像基于 `ahuarte47/cesium-terrain-builder` 的 `master-quantized-mesh` 分支，支持两种输出格式：
+- TMS Global Geodetic / Mercator 网格（默认瓦片边长 geodetic 65、mercator 256）
+- 高程采样时的 terrain 规格 1 像素西/北重叠（Python 窗口 I/O + C++ 重采样）
+- Chunked LOD + Lindstrom–Koller BTT（`HeightFieldChunker`），几何误差 `2πR × 0.25 × mesh_qfactor / (tileWidth × tilesAtL0) / 2^z`（C++）
+- zoom ≤ 6 的 CTB `smoothSmallZooms` 格网加密；zoom > 6 的邻接边激活缝合
+- quantized-mesh-1.0（ECEF、包围球、地平遮挡点、zigzag、边索引、oct 法线）与 heightmap-1.0（C++ 编码；gzip 用 Python 标准库）
+- `-C` CesiumJS 缺根瓦片补齐
+
+栅格采进瓦片沿用 [ocean-imagery-handler](https://github.com/ch-dpf/ocean-imagery-handler/tree/master-zy) 的窗口读取 / overview 设计。逐像素插值、面积加权 `average`、BTT meshing 与网格编码均在 C++ 中执行并释放 GIL，**生产不回退 Python 热路径**。
+
+CI 为 Linux x86_64/aarch64、Windows x64、macOS Intel/Apple Silicon 构建平台 wheel；`pip` 按 wheel tag 自动选择。Docker 使用同一套 wheel 的多阶段构建。详见 [裸机部署](docs/DEPLOY.md) 与 [CTB 移植映射](docs/CTB_NATIVE_PORT.md)。
 
 | `output_format` | layer.json format | 说明 |
 |-----------------|-------------------|------|
 | `Terrain` | `heightmap-1.0` | 传统高度图瓦片 |
 | `Mesh` | `quantized-mesh-1.0` | 量化网格（推荐，现代 Cesium 性能更好） |
 
-### 构建 CTB 镜像
+## 部署方式
 
-在 `cesium-terrain-builder` 源码目录执行：
+| 方式 | 说明 |
+|---|---|
+| Docker Compose | 镜像构建阶段生成当前 CPU 架构的 wheel；运行镜像不含编译器 |
+| Linux 裸机 | 安装对应的 manylinux x86_64/aarch64 wheel，使用随库提供的 systemd/Nginx 模板 |
+| Windows/macOS 裸机 | 安装对应平台 wheel；进程入口为 `ocean-terrain-api` / `ocean-terrain-worker` |
 
-```bash
-docker build -t cesium-terrain-builder:local .
-```
-
-验证：
-
-```bash
-docker run --rm cesium-terrain-builder:local ctb-tile --version
-```
+运行时外部中间件只有 Redis 与 Nginx。裸机不安装 GDAL、CTB、Cython或 C++ 编译器。
 
 ## 快速开始
 
@@ -253,21 +258,21 @@ viewer.terrainProvider = await Cesium.CesiumTerrainProvider.fromUrl(
 
 ```bash
 python -m venv .venv
-.venv\Scripts\activate        # Windows
-pip install -r requirements.txt
+source .venv/bin/activate     # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"
+python -m app.services.ctb.native_check
 
 # 启动 Redis（可用 docker run -p 6379:6379 redis:7-alpine）
 cp .env.example .env          # 修改 REDIS_URL 为 redis://localhost:6379/0
 
 # 终端 1
-uvicorn app.main:app --reload --port 8000
+ocean-terrain-api
 
 # 终端 2
-celery -A app.worker.celery_app worker --loglevel=info
+ocean-terrain-worker
 ```
 
-Worker 镜像基于 `python:3.12-slim`，预处理为自研 Python 栅格引擎（`tifffile` / `pyproj` / `numpy`），切片通过挂载 `/var/run/docker.sock` 调用宿主机上的 `cesium-terrain-builder:local`。本地开发需 Python 3.11+，且 Docker 可执行并已构建 CTB 镜像。
+源码开发需要 CPython 3.11–3.14 和平台 C++17 编译器；裸机生产应安装 CI 生成的 wheel，不在业务机编译。Worker 找不到原生扩展会在启动时直接失败。
 
 预览与瓦片发布需单独启动 nginx（或使用 `docker compose up terrain-server`）。
 
@@ -283,8 +288,8 @@ ocean-terrain-handler/
 │   ├── services/
 │   │   ├── preprocessor.py  # DEM 预处理
 │   │   ├── raster/          # 自研 GeoTIFF / warp / fill-nodata / overview
-│   │   ├── ctb/             # Python CTB 移植（暂不在运行路径中使用）
-│   │   ├── ctb_runner.py    # Docker ctb-tile 调用
+│   │   ├── ctb/             # CTB 调度 / 网格 / C++ 热路径
+│   │   ├── ctb_runner.py    # 切片入口
 │   │   ├── layer_json.py    # layer.json 生成
 │   │   ├── tile_publisher.py # 瓦片发布注册
 │   │   └── job_store.py     # Redis 任务状态
@@ -294,6 +299,9 @@ ocean-terrain-handler/
 ├── docker/
 │   └── nginx.conf           # 地形瓦片 + 预览 + API 反代
 ├── scripts/preview/         # Cesium 预览 SPA
+├── deploy/                 # 裸机环境、systemd、Nginx、Windows 启动模板
+├── docs/DEPLOY.md          # 裸机部署与 wheel 发布手册
+├── benchmarks/             # 真实 DEM 端到端吞吐基准
 ├── tests/
 ├── docker-compose.yml
 ├── Dockerfile
@@ -305,6 +313,8 @@ ocean-terrain-handler/
 | 变量 | 默认 | 说明 |
 |------|------|------|
 | `REDIS_URL` | `redis://redis:6379/0` | Redis 连接 |
+| `CELERY_WORKER_CONCURRENCY` | `1` | Worker 同时处理的任务数；单任务内部已并行 |
+| `CELERY_WORKER_POOL` | 平台默认 | Windows 入口自动使用 `solo` |
 | `WORKSPACE_DIR` | `/data/workspace` | 工作目录 |
 | `WORKSPACE_DOCKER_VOLUME` | `ocean-terrain-handler_workspace_data` | CTB 使用的 Docker 命名卷（Docker Desktop 推荐）；与 `HOST_WORKSPACE_DIR` 二选一 |
 | `HOST_WORKSPACE_DIR` | — | 宿主机 `./data` 绝对路径（仅 host-data 模式；Windows 例：`D:/workspace/ocean-terrain-handler/data`） |
@@ -317,7 +327,7 @@ ocean-terrain-handler/
 
 ## 注意事项
 
-- 使用前必须先构建本地 CTB 镜像：`docker build -t cesium-terrain-builder:local D:\workspace\cesium-terrain-builder`
+- 切片必须加载 wheel 中的 C++ 扩展；缺失时 Worker 拒绝启动，不会静默降级
 - 默认输出 `output_format: "Mesh"`（quantized-mesh）；若需 heightmap 再设为 `"Terrain"`
 - 输入 DEM 应为海拔高程数据，多波段栅格仅使用第一波段
 - NODATA 必须在切片前填充，否则空值会进入网格高程

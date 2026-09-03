@@ -27,6 +27,11 @@ from app.services.ctb.constants import (
 )
 
 
+def gzip_terrain(payload: bytes) -> bytes:
+    """Gzip a terrain payload (stdlib; no native zlib). mtime=0 keeps headers stable."""
+    return gzip.compress(payload, compresslevel=GZIP_COMPRESSLEVEL, mtime=0)
+
+
 def cpp_round(value: float) -> int:
     """C++ ``std::round`` (half away from zero)."""
     if value >= 0.0:
@@ -340,7 +345,7 @@ def encode_quantized_mesh(
         for normal in normals_vertex:
             ox, oy = oct_encode(normal.normalize())
             buf.extend(struct.pack("<BB", ox, oy))
-    return gzip.compress(bytes(buf), compresslevel=GZIP_COMPRESSLEVEL)
+    return gzip_terrain(bytes(buf))
 
 
 def encode_heightmap(heights: np.ndarray, children: int) -> bytes:
@@ -350,7 +355,7 @@ def encode_heightmap(heights: np.ndarray, children: int) -> bytes:
     buf = bytearray(encoded.astype("<u2").tobytes())
     buf.append(children & 0xFF)
     buf.append(0)  # land mask (Terrain::setIsLand)
-    return gzip.compress(bytes(buf), compresslevel=GZIP_COMPRESSLEVEL)
+    return gzip_terrain(bytes(buf))
 
 
 def child_flags(

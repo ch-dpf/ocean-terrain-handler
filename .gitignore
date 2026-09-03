@@ -5,6 +5,7 @@ __pycache__/
 .eggs/
 dist/
 build/
+wheelhouse/
 .venv/
 venv/
 .env
@@ -13,5 +14,8 @@ venv/
 .ruff_cache/
 data/
 *.log
+*.so
+*.pyd
+app/services/ctb/native/_ctb_core.cpp
 .idea/
 .vscode/

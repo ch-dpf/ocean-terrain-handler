@@ -9,6 +9,7 @@ import struct
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from app.schemas import CtbOptions, OutputFormat, Profile, ResamplingMethod
 from app.services.ctb.constants import (
@@ -16,13 +17,30 @@ from app.services.ctb.constants import (
     HEIGHTMAP_OFFSET_M,
     HEIGHTMAP_SCALE,
     HEIGHTMAP_TERRAIN_QUALITY,
+    MERCATOR_MESH_DEFAULT_TILE_SIZE,
     SEMI_MAJOR_AXIS,
 )
 from app.services.ctb.encode import encode_heightmap, zigzag_encode
-from app.services.ctb.grid import TileCoordinate, global_geodetic
+from app.services.ctb.grid import (
+    CRSBounds,
+    TileCoordinate,
+    global_geodetic,
+    iter_tile_coordinates,
+    tile_coordinate_count,
+)
 from app.services.ctb.heightfield import HeightField, MeshBuilder
-from app.services.ctb.tiler import geometric_error_for_zoom, level_zero_geometric_error, run_ctb_tile
+from app.services.ctb.mesh_encode import native_available
+from app.services.ctb.tiler import (
+    CtbError,
+    geometric_error_for_zoom,
+    level_zero_geometric_error,
+    run_ctb_tile,
+)
 from tests.raster_fixtures import write_dem_geotiff_4326
+
+_SKIP_WITHOUT_NATIVE = pytest.mark.skipif(
+    not native_available(), reason="CTB native extension not built"
+)
 
 
 def test_geodetic_z0_eastern_hemisphere_bounds():
@@ -32,6 +50,29 @@ def test_geodetic_z0_eastern_hemisphere_bounds():
     assert bounds.miny == -90.0
     assert bounds.maxx == 180.0
     assert bounds.maxy == 90.0
+
+
+def test_tile_coordinates_stream_and_count_match():
+    grid = global_geodetic(65)
+    extent = CRSBounds(116.0, 39.0, 117.0, 40.0)
+    coordinates = iter_tile_coordinates(grid, extent, 9, 7)
+    assert not isinstance(coordinates, list)
+    materialized = list(coordinates)
+    assert len(materialized) == tile_coordinate_count(grid, extent, 9, 7)
+
+
+def test_mercator_mesh_default_is_valid_btt_size():
+    edge = MERCATOR_MESH_DEFAULT_TILE_SIZE - 1
+    assert edge & (edge - 1) == 0
+
+
+def test_mesh_rejects_non_btt_tile_size(tmp_path: Path):
+    with pytest.raises(CtbError, match="Mesh tile_size"):
+        run_ctb_tile(
+            tmp_path / "unused.tif",
+            tmp_path / "tiles",
+            CtbOptions(tile_size=64),
+        )
 
 
 def test_level_zero_geometric_error_matches_ctb_formula():
@@ -78,6 +119,7 @@ def test_zigzag_matches_ctb_int32_shift():
     assert zigzag_encode(-2) == 3
 
 
+@_SKIP_WITHOUT_NATIVE
 def test_run_ctb_tile_mesh_writes_gzip_terrain_and_layer_json(tmp_path: Path):
     source = write_dem_geotiff_4326(
         tmp_path / "dem.tif",
@@ -121,6 +163,7 @@ def test_run_ctb_tile_mesh_writes_gzip_terrain_and_layer_json(tmp_path: Path):
     assert layer["available"][0][0]["endX"] == 1
 
 
+@_SKIP_WITHOUT_NATIVE
 def test_run_ctb_tile_heightmap_and_layer_only(tmp_path: Path):
     source = write_dem_geotiff_4326(
         tmp_path / "dem.tif",
