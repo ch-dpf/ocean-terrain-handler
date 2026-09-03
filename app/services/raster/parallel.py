@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import math
 import os
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait
+from pathlib import Path
 from typing import TypeVar
 
 T = TypeVar("T")
@@ -13,7 +15,49 @@ R = TypeVar("R")
 
 
 def default_workers() -> int:
-    return max(1, os.cpu_count() or 1)
+    """Respect affinity, Docker CPU quota and an optional raster worker cap."""
+    count = os.cpu_count() or 1
+    try:
+        count = min(count, len(os.sched_getaffinity(0)))
+    except (AttributeError, OSError):
+        pass
+    quota = _cpu_quota_count()
+    if quota is not None:
+        count = min(count, quota)
+    setting = os.environ.get("OTH_RASTER_WORKERS")
+    if setting is not None:
+        try:
+            requested = int(setting)
+        except ValueError as exc:
+            raise ValueError("OTH_RASTER_WORKERS must be a positive integer") from exc
+        if requested < 1:
+            raise ValueError("OTH_RASTER_WORKERS must be a positive integer")
+        count = min(count, requested)
+    return max(1, count)
+
+
+def _cpu_quota_count() -> int | None:
+    try:
+        quota, period = Path("/sys/fs/cgroup/cpu.max").read_text().split()
+        if quota != "max":
+            return max(1, math.ceil(int(quota) / int(period)))
+    except (OSError, ValueError, ZeroDivisionError):
+        pass
+    try:
+        root = Path("/sys/fs/cgroup/cpu")
+        quota = int((root / "cpu.cfs_quota_us").read_text())
+        period = int((root / "cpu.cfs_period_us").read_text())
+        if quota > 0 and period > 0:
+            return max(1, math.ceil(quota / period))
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def raster_workers(cache_bytes: int, task_bytes: int, requested: int | None) -> int:
+    # Half for reader cache, half for the ordered map's <= 2*workers tasks.
+    workers = default_workers() if requested is None else max(1, int(requested))
+    return max(1, min(workers, max(1, cache_bytes // max(4 * task_bytes, 1))))
 
 
 def ordered_parallel_map(

@@ -15,6 +15,7 @@ import numpy as np
 from pyproj import CRS
 
 from app.schemas import CtbOptions, OutputFormat, Profile
+from app.services.ctb.checkpoint import job_signature, read_signature, reusable_tile
 from app.services.ctb.constants import (
     HEIGHTMAP_TERRAIN_QUALITY,
     MERCATOR_MESH_DEFAULT_TILE_SIZE,
@@ -37,6 +38,7 @@ from app.services.ctb.sample import (
     dataset_resolution,
     sample_tile_heights,
 )
+from app.services.ctb.sample_cache import SampleCache
 from app.services.layer_json import FORMAT_MAP
 from app.services.raster.affine import Affine
 from app.services.raster.errors import RasterError
@@ -108,24 +110,13 @@ class _LevelInfo:
 class _Metadata:
     def __init__(self) -> None:
         self.levels: list[_LevelInfo] = []
-        self.bounds: CRSBounds | None = None
         self._lock = threading.Lock()
 
-    def add(self, grid: Grid, coord: TileCoordinate) -> None:
-        tile_bounds = grid.tile_bounds(coord)
+    def add(self, coord: TileCoordinate) -> None:
         with self._lock:
             while len(self.levels) <= coord.zoom:
                 self.levels.append(_LevelInfo())
             self.levels[coord.zoom].add_coord(coord)
-            if self.bounds is None:
-                self.bounds = tile_bounds
-            else:
-                self.bounds = CRSBounds(
-                    min(self.bounds.minx, tile_bounds.minx),
-                    min(self.bounds.miny, tile_bounds.miny),
-                    max(self.bounds.maxx, tile_bounds.maxx),
-                    max(self.bounds.maxy, tile_bounds.maxy),
-                )
 
 
 def _write_layer_json(
@@ -138,6 +129,7 @@ def _write_layer_json(
     vertex_normals: bool,
     cesium_friendly: bool,
     end_zoom: int,
+    dataset_bounds: CRSBounds,
 ) -> None:
     if cesium_friendly and profile == Profile.GEODETIC and end_zoom <= 0 and metadata.levels:
         level0 = metadata.levels[0]
@@ -160,7 +152,6 @@ def _write_layer_json(
             )
         else:
             available.append([])
-    bounds = metadata.bounds
     payload = {
         "tilejson": "2.1.0",
         "name": name,
@@ -171,15 +162,26 @@ def _write_layer_json(
         "scheme": "tms",
         "tiles": ["{z}/{x}/{y}.terrain?v={version}"],
         "projection": "EPSG:4326" if profile == Profile.GEODETIC else "EPSG:3857",
-        "bounds": (
-            [bounds.minx, bounds.miny, bounds.maxx, bounds.maxy] if bounds is not None else [-180.0, -90.0, 180.0, 90.0]
-        ),
+        # DEM extent (not the union of TMS tile rectangles / cesium-friendly roots).
+        "bounds": [
+            dataset_bounds.minx,
+            dataset_bounds.miny,
+            dataset_bounds.maxx,
+            dataset_bounds.maxy,
+        ],
         "available": available,
     }
+    if profile == Profile.MERCATOR:
+        from app.services.raster.crsutil import make_transformer
+
+        transformer = make_transformer(CRS.from_epsg(3857), CRS.from_epsg(4326))
+        west, south = transformer.transform(dataset_bounds.minx, dataset_bounds.miny)
+        east, north = transformer.transform(dataset_bounds.maxx, dataset_bounds.maxy)
+        payload["bounds"] = [west, south, east, north]
     if vertex_normals and output_format == OutputFormat.MESH:
         payload["extensions"] = ["octvertexnormals"]
     path = output_dir / "layer.json"
-    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    _atomic_write(path, (json.dumps(payload, indent=2, allow_nan=False) + "\n").encode("utf-8"))
 
 
 def _neighbor_heights(
@@ -188,6 +190,7 @@ def _neighbor_heights(
     coord: TileCoordinate,
     dataset_bounds: CRSBounds,
     resampling: str,
+    sample_cache: SampleCache | None = None,
 ) -> dict[int, np.ndarray]:
     found: dict[int, np.ndarray] = {}
     for border in range(4):
@@ -196,8 +199,16 @@ def _neighbor_heights(
             continue
         if not dataset_bounds.overlaps(grid.tile_bounds(neighbor)):
             continue
-        found[border] = sample_tile_heights(src, grid, neighbor, resampling)
+        found[border] = _sample_cached(src, grid, neighbor, resampling, sample_cache)
     return found
+
+
+def _sample_cached(src, grid, coord, resampling, cache):
+    if cache is None:
+        return sample_tile_heights(src, grid, coord, resampling)
+    # Cache lifetime is one job: source, profile, resolution and policy are fixed.
+    key = (coord.zoom, coord.x, coord.y, resampling)
+    return cache.get(key, lambda: sample_tile_heights(src, grid, coord, resampling))
 
 
 def _encode_tile(
@@ -207,15 +218,17 @@ def _encode_tile(
     options: CtbOptions,
     dataset_bounds: CRSBounds,
     max_zoom: int,
+    sample_cache: SampleCache | None = None,
 ) -> bytes:
     resampling = options.resampling_method.value
-    heights = sample_tile_heights(src, grid, coord, resampling)
+    heights = _sample_cached(src, grid, coord, resampling, sample_cache)
     if options.output_format == OutputFormat.TERRAIN:
-        flags = child_flags(dataset_bounds, grid.tile_bounds(coord), is_max_zoom=coord.zoom == max_zoom)
+        flags = child_flags(
+            dataset_bounds, grid.tile_bounds(coord), is_max_zoom=coord.zoom == max_zoom
+        )
         return encode_heightmap_tile_bytes(heights, flags)
     neighbors: dict[int, np.ndarray] = {}
-    if coord.zoom > SMOOTH_SMALL_ZOOM_MAX:
-        neighbors = _neighbor_heights(src, grid, coord, dataset_bounds, resampling)
+    # Canonical edge polylines remove the need for neighbor activation passes.
     bounds = grid.tile_bounds(coord)
     error = geometric_error_for_zoom(grid, coord.zoom, grid.tile_size, options.mesh_qfactor)
     try:
@@ -229,6 +242,8 @@ def _encode_tile(
             coord.zoom <= SMOOTH_SMALL_ZOOM_MAX,
             neighbors,
             options.vertex_normals and options.output_format == OutputFormat.MESH,
+            options.profile == Profile.MERCATOR,
+            True,
         )
     except Exception as exc:
         raise CtbError(
@@ -312,6 +327,14 @@ def run_ctb_tile(
     **_ignored: object,
 ) -> None:
     """In-process CTB tiler: Python scheduling/I/O, mandatory C++ hot paths."""
+    if options.creation_options:
+        raise CtbError("creation_options are not supported by the in-process tiler")
+    if options.warp_memory is not None:
+        raise CtbError("warp_memory is not supported; configure the job cache budget instead")
+    if options.error_threshold != 0.125:
+        raise CtbError(
+            "error_threshold overrides are not supported: this tiler uses exact transforms"
+        )
     output_dir.mkdir(parents=True, exist_ok=True)
     tile_size = options.tile_size
     if (
@@ -333,6 +356,33 @@ def run_ctb_tile(
         raise CtbError(str(exc)) from exc
 
     with src_cm as src:
+        checkpoint = output_dir / ".tiling-state.json"
+        signature = None
+        if not options.layer_only:
+            signature = job_signature(input_path, options)
+            if options.resume:
+                if checkpoint.exists():
+                    try:
+                        if read_signature(checkpoint) != signature:
+                            raise CtbError(
+                                "Resume source or encoding options changed; use a new output directory"
+                            )
+                    except (ValueError, KeyError) as exc:
+                        raise CtbError(
+                            "Invalid resume checkpoint; use a new output directory"
+                        ) from exc
+                elif any(output_dir.rglob("*.terrain")):
+                    raise CtbError(
+                        "Existing tiles have no compatible resume checkpoint; use a new output directory"
+                    )
+            elif any(output_dir.rglob("*.terrain")):
+                raise CtbError(
+                    "Output already contains tiles; use resume or a new output directory"
+                )
+            _atomic_write(
+                checkpoint, json.dumps({"status": "building", "signature": signature}).encode()
+            )
+            (output_dir / "layer.json").unlink(missing_ok=True)
         dataset_bounds = dataset_bounds_in_grid_crs(src, grid)
         resolution = dataset_resolution(src, grid, dataset_bounds)
         auto_max = grid.zoom_for_resolution(resolution)
@@ -348,7 +398,10 @@ def run_ctb_tile(
         metadata = _Metadata()
         workers = options.thread_count if options.thread_count is not None else default_workers()
         workers = max(1, int(workers))
-        per_reader_cache = max(1, cache // workers)
+        # Reserve a quarter of the budget for at most four tasks per worker.
+        workers = min(workers, max(1, cache // max(16 * grid.tile_size * grid.tile_size * 64, 1)))
+        sample_cache = None  # Each tile is sampled once with canonical edges.
+        per_reader_cache = max(1, (cache // 2) // workers)
         thread_state = threading.local()
         worker_readers: list[GeoTiffReader] = []
         worker_readers_lock = threading.Lock()
@@ -374,10 +427,16 @@ def run_ctb_tile(
 
         def _process(coord: TileCoordinate) -> None:
             try:
-                metadata.add(grid, coord)
+                metadata.add(coord)
                 if not options.layer_only:
                     path = _tile_path(output_dir, coord)
-                    if not (options.resume and path.is_file()):
+                    if not (
+                        options.resume
+                        and path.is_file()
+                        and reusable_tile(
+                            path, options.output_format == OutputFormat.MESH, grid.tile_size
+                        )
+                    ):
                         payload = _encode_tile(
                             _worker_source(),
                             grid,
@@ -385,6 +444,7 @@ def run_ctb_tile(
                             options,
                             dataset_bounds,
                             start_zoom,
+                            sample_cache,
                         )
                         _atomic_write(path, payload)
             finally:
@@ -418,7 +478,12 @@ def run_ctb_tile(
             vertex_normals=options.vertex_normals,
             cesium_friendly=options.cesium_friendly,
             end_zoom=end_zoom,
+            dataset_bounds=dataset_bounds,
         )
+        if signature is not None:
+            _atomic_write(
+                checkpoint, json.dumps({"status": "complete", "signature": signature}).encode()
+            )
 
     if on_subprogress is not None:
         on_subprogress(100.0, "Tiling complete")

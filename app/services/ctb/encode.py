@@ -351,7 +351,10 @@ def encode_quantized_mesh(
 def encode_heightmap(heights: np.ndarray, children: int) -> bytes:
     """heightmap-1.0: uint16 heights + child flags + 1-byte land mask, gzipped."""
     flat = np.asarray(heights, dtype=np.float32).reshape(-1)
-    encoded = np.trunc((flat + HEIGHTMAP_OFFSET_M) * HEIGHTMAP_SCALE).astype(np.int32).astype(np.uint16)
+    values = (flat.astype(np.float64) + HEIGHTMAP_OFFSET_M) * HEIGHTMAP_SCALE
+    if not np.isfinite(values).all() or np.any((values < 0) | (values > 65535)):
+        raise ValueError("Heightmap elevation outside [-1000, 12107] metres; use Mesh")
+    encoded = np.trunc(values).astype(np.uint16)
     buf = bytearray(encoded.astype("<u2").tobytes())
     buf.append(children & 0xFF)
     buf.append(0)  # land mask (Terrain::setIsLand)

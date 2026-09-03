@@ -1,0 +1,41 @@
+<!doctype html><meta charset="utf-8"><title>Terrain acceptance — Cesium 1.120</title>
+<link rel="stylesheet" href="https://cesium.com/downloads/cesiumjs/releases/1.120/Build/Cesium/Widgets/widgets.css">
+<style>html,body{margin:0;background:#152332;color:white;font:14px sans-serif}#view{width:100vw;height:75vh}#view .cesium-widget,#view .cesium-viewer,#view .cesium-viewer-cesiumWidgetContainer,#view canvas{width:100%;height:100%}pre{white-space:pre-wrap;padding:12px}</style>
+<script>window.CESIUM_BASE_URL='https://cesium.com/downloads/cesiumjs/releases/1.120/Build/Cesium/';</script>
+<script src="/Cesium.js"></script><script src="/adapter.js"></script>
+<div id="view"></div><pre id="status">Running real terrain worker and WebGL checks…</pre>
+<script>
+(async function(){
+  const result={cesium:Cesium.VERSION,errors:[],root_meshes:[]};
+  try {
+    Cesium.Ion.defaultAccessToken=undefined;
+    const provider=await Cesium.CesiumTerrainProvider.fromUrl('/tiles/',{requestVertexNormals:true});
+    OceanTerrainCompatibility.attachHorizonGuard(provider,Cesium);
+    provider.errorEvent.addEventListener(e=>result.errors.push(String(e.message)));
+    for(let x=0;x<2;x++){
+      const data=await provider.requestTileGeometry(x,0,0);
+      const guarded=data._horizonOcclusionPoint===undefined;
+      const mesh=await data.createMesh({tilingScheme:provider.tilingScheme,x:x,y:0,level:0,throttle:false});
+      if(!mesh || !mesh.vertices.every(Number.isFinite))throw new Error('Invalid root vertices');
+      const p=mesh.occludeePointInScaledSpace;
+      if(p && ![p.x,p.y,p.z].every(Number.isFinite))throw new Error('Invalid root culling point');
+      result.root_meshes.push({x:x,guarded:guarded,vertices:mesh.vertices.length,culling_point_defined:!!p});
+    }
+    const viewer=new Cesium.Viewer('view',{animation:false,timeline:false,baseLayerPicker:false,
+      geocoder:false,homeButton:false,sceneModePicker:false,navigationHelpButton:false,
+      fullscreenButton:false,baseLayer:false,skyBox:false,skyAtmosphere:false,terrainProvider:provider});
+    viewer.scene.globe.showWaterEffect=false;
+    viewer.scene.renderError.addEventListener((scene,error)=>result.errors.push(String(error)));
+    viewer.camera.setView({destination:Cesium.Cartesian3.fromDegrees(132.5,-7.5,500000)});
+    let frames=0;
+    await new Promise(resolve=>{const remove=viewer.scene.postRender.addEventListener(()=>{
+      frames++;if(frames>=180){remove();resolve();}
+    });});
+    result.rendered_frames=frames;
+    result.webgl=!!viewer.scene.context;
+    result.pass=result.errors.length===0;
+  }catch(e){result.errors.push(String(e));result.pass=false;}
+  document.getElementById('status').textContent=JSON.stringify(result,null,2);
+  await fetch('/results',{method:'POST',body:JSON.stringify(result)});
+})();
+</script>

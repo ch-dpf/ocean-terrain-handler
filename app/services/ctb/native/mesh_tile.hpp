@@ -15,7 +15,9 @@ std::string encode_mesh_tile(
     double geometric_error,
     bool smooth_small_zooms,
     const float* const* neighbor_heights,
-    bool write_vertex_normals
+    bool write_vertex_normals,
+    bool web_mercator,
+    bool canonical_edges
 );
 
 std::string encode_heightmap_tile(const float* heights, int rows, int cols, int children);

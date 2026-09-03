@@ -784,6 +784,7 @@
     const provider = await Cesium.CesiumTerrainProvider.fromUrl(terrainUrl, {
       requestVertexNormals: true,
     });
+    OceanTerrainCompatibility.attachHorizonGuard(provider, Cesium);
 
     viewer.terrainProvider = provider;
     viewer.scene.globe.depthTestAgainstTerrain = true;

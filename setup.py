@@ -22,6 +22,7 @@ ext = Extension(
         f"{NATIVE}/heightfield.hpp",
         f"{NATIVE}/encode.hpp",
         f"{NATIVE}/resample.hpp",
+        f"{NATIVE}/fill_nodata.hpp",
     ],
     define_macros=[("NOMINMAX", "1")],
     language="c++",

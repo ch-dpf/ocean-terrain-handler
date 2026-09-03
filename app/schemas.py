@@ -46,7 +46,9 @@ class PreprocessOptions(BaseModel):
 
     target_crs: str = Field(default="EPSG:4326", description="重投影目标坐标系")
     fill_nodata: bool = Field(default=True, description="切片前填充 NODATA")
-    build_overviews: bool = Field(default=True, description="构建 GeoTIFF 低分辨率概览图（overview）")
+    build_overviews: bool = Field(
+        default=True, description="构建 GeoTIFF 低分辨率概览图（overview）"
+    )
     # GeoTIFF TileWidth/TileHeight must be multiples of 16 (not CTB's 65px mesh size).
     block_size: int = Field(
         default=256,
@@ -76,12 +78,12 @@ class CtbOptions(BaseModel):
     error_threshold: float = Field(
         default=0.125,
         gt=0,
-        description="CTB/GDAL 近似变换误差（像素）；Python warp 为精确反算，该字段仅保留选项兼容",
+        description="精确反算引擎仅接受兼容默认值 0.125；其他值不支持",
     )
     warp_memory: int | None = Field(
         default=None,
         ge=0,
-        description="CTB/GDAL warp 内存上限（字节）；Python 切片忽略",
+        description="当前引擎不支持此 CTB 参数；须为 null，内存通过任务缓存预算控制",
     )
     resume: bool = Field(default=False, description="断点续跑")
     mesh_qfactor: float = Field(default=1.0, gt=0, description="网格质量因子")
@@ -91,7 +93,9 @@ class CtbOptions(BaseModel):
     vertex_normals: bool = Field(default=True, description="输出顶点法线（仅 Mesh 格式）")
     quiet: bool = Field(default=False, description="静默输出")
     verbose: bool = Field(default=False, description="详细日志")
-    creation_options: list[str] = Field(default_factory=list, description="额外创建选项")
+    creation_options: list[str] = Field(
+        default_factory=list, description="当前引擎不支持额外创建选项；须为空列表"
+    )
 
 
 class PublishOptions(BaseModel):
@@ -114,7 +118,9 @@ class TerrainJobCreate(BaseModel):
         default=None,
         description="工作区内输入 TIF 的绝对路径（与上传互斥）",
     )
-    preprocess: PreprocessOptions = Field(default_factory=PreprocessOptions, description="预处理选项")
+    preprocess: PreprocessOptions = Field(
+        default_factory=PreprocessOptions, description="预处理选项"
+    )
     ctb_options: CtbOptions = Field(default_factory=CtbOptions, description="CTB 切片选项")
     publish: PublishOptions = Field(default_factory=PublishOptions, description="发布选项")
 
@@ -151,7 +157,9 @@ class JobProgress(BaseModel):
         description="进度计量：已写入/计划的未压缩栅格字节数",
     )
     bytes_done: int | None = Field(default=None, ge=0, description="已完成的未压缩栅格字节数")
-    bytes_planned: int | None = Field(default=None, ge=0, description="任务计划中的未压缩栅格字节数")
+    bytes_planned: int | None = Field(
+        default=None, ge=0, description="任务计划中的未压缩栅格字节数"
+    )
     calibration_samples: int | None = Field(
         default=None,
         description="兼容字段；字节进度不使用历史校准",

@@ -91,6 +91,48 @@ public:
 
     int size() const { return size_; }
 
+    // Shared edge knots depend only on the edge signal, never tile interiors.
+    void prepare_canonical_edges(double tolerance) {
+        const int last = size_ - 1;
+        for (int edge = 0; edge < 4; ++edge) {
+            auto index = [&](int p) {
+                if (edge == 0) return index_of(0, p);
+                if (edge == 1) return index_of(p, 0);
+                if (edge == 2) return index_of(last, p);
+                return index_of(p, last);
+            };
+            std::vector<float> values(size_);
+            for (int p = 0; p <= last; ++p) values[p] = heights_[index(p)];
+            std::vector<int> knots{0, last};
+            std::vector<std::pair<int, int>> pending{{0, last}};
+            while (!pending.empty()) {
+                const auto interval = pending.back();
+                pending.pop_back();
+                const int a = interval.first, b = interval.second;
+                int split = -1;
+                double error = tolerance;
+                for (int p = a + 1; p < b; ++p) {
+                    const double linear = values[a] + (static_cast<double>(values[b]) - values[a]) * (p - a) / (b - a);
+                    const double delta = std::abs(values[p] - linear);
+                    if (delta > error) { error = delta; split = p; }
+                }
+                if (split >= 0) {
+                    knots.push_back(split);
+                    pending.emplace_back(a, split);
+                    pending.emplace_back(split, b);
+                }
+            }
+            std::sort(knots.begin(), knots.end());
+            for (int p : knots) edge_knots_.push_back(index(p));
+            for (size_t k = 1; k < knots.size(); ++k) {
+                const int a = knots[k-1], b = knots[k];
+                for (int p = a; p <= b; ++p) {
+                    heights_[index(p)] = static_cast<float>(values[a] + (static_cast<double>(values[b]) - values[a]) * (p-a) / (b-a));
+                }
+            }
+        }
+    }
+
     int index_of(int x, int y) const { return y * size_ + x; }
 
     float height(int x, int y) const { return heights_[static_cast<size_t>(index_of(x, y))]; }
@@ -135,6 +177,7 @@ public:
         activate(0, 0, 0);
         activate(0, last, 0);
         activate(last, last, 0);
+        for (int index : edge_knots_) activate(index % size_, index / size_, 0);
         if (smooth_small_zooms) {
             const int step = last / 16;
             if (step > 0) {
@@ -344,6 +387,7 @@ private:
     int size_;
     int log_size_;
     std::vector<float> heights_;
+    std::vector<int> edge_knots_;
     std::vector<std::uint8_t> levels_;
 };
 

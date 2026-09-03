@@ -41,9 +41,8 @@ def _replace_with_sidecar(source: Path, dest: Path) -> None:
     source.replace(dest)
     ovr_src = Path(str(source) + ".ovr")
     ovr_dst = Path(str(dest) + ".ovr")
+    ovr_dst.unlink(missing_ok=True)
     if ovr_src.is_file():
-        if ovr_dst.exists():
-            ovr_dst.unlink()
         ovr_src.replace(ovr_dst)
 
 
@@ -82,7 +81,7 @@ def preprocess_dem(
         on_subprogress(100.0 * done / preprocess_bytes, message or "reproject")
 
     try:
-        reproject_geotiff(
+        reproject_result = reproject_geotiff(
             input_path,
             warped,
             dst_crs=options.target_crs,
@@ -106,19 +105,23 @@ def preprocess_dem(
             on_subprogress(min(100.0 * done / preprocess_bytes, 100.0), message or "fill-nodata")
 
         try:
-            fill_nodata_geotiff(
-                current,
-                filled,
-                max_distance=DEFAULT_MAX_DISTANCE,
-                block_size=options.block_size,
-                compress="DEFLATE",
-                cache_bytes=cache_bytes,
-                nodata=options.nodata_value,
-                on_progress=_emit_fill if on_subprogress is not None else None,
-            )
+            if reproject_result.invalid_pixels == 0:
+                if on_subprogress is not None:
+                    _emit_fill(100.0, "fill-nodata skipped: no invalid pixels")
+            else:
+                fill_nodata_geotiff(
+                    current,
+                    filled,
+                    max_distance=DEFAULT_MAX_DISTANCE,
+                    block_size=options.block_size,
+                    compress="DEFLATE",
+                    cache_bytes=cache_bytes,
+                    nodata=options.nodata_value,
+                    on_progress=_emit_fill if on_subprogress is not None else None,
+                )
+                current = filled
         except RasterError as exc:
             raise PreprocessError(str(exc)) from exc
-        current = filled
 
     if options.build_overviews:
 

@@ -313,12 +313,18 @@ inline void write_edge_indices(
 inline std::string encode_quantized_mesh(
     const std::vector<Vertex>& vertices,
     const std::vector<int>& indices,
-    bool write_vertex_normals
+    bool write_vertex_normals,
+    bool web_mercator = false
 ) {
     std::vector<Vec3> cartesian;
     cartesian.reserve(vertices.size());
     for (const Vertex& vertex : vertices) {
-        cartesian.push_back(llh_to_ecef(vertex.x, vertex.y, vertex.z));
+        // Quantized u/v remain in tile coordinates. ECEF and normals require
+        // geodetic degrees, even when those coordinates are Mercator metres.
+        constexpr double degrees_per_radian = 57.2957795130823208768;
+        const double lon = web_mercator ? vertex.x / kRadiusX * degrees_per_radian : vertex.x;
+        const double lat = web_mercator ? std::atan(std::sinh(vertex.y / kRadiusX)) * degrees_per_radian : vertex.y;
+        cartesian.push_back(llh_to_ecef(lon, lat, vertex.z));
     }
     const auto sphere = bounding_sphere_from_points(cartesian);
     const Vec3 sphere_center = sphere.first;
@@ -445,6 +451,9 @@ inline std::string encode_heightmap(const float* heights, int count, int childre
     buf.reserve(static_cast<size_t>(count) * 2 + 2);
     for (int i = 0; i < count; ++i) {
         const double value = (static_cast<double>(heights[i]) + kHeightmapOffsetM) * kHeightmapScale;
+        if (!std::isfinite(value) || value < 0.0 || value > 65535.0) {
+            throw std::runtime_error("Heightmap elevation outside [-1000, 12107] metres; use Mesh");
+        }
         const auto encoded = static_cast<std::uint16_t>(static_cast<std::int32_t>(std::trunc(value)));
         write_le<std::uint16_t>(buf, encoded);
     }

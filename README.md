@@ -68,8 +68,7 @@ CI 为 Linux x86_64/aarch64、Windows x64、macOS Intel/Apple Silicon 构建平�
 ### 前置条件
 
 - Docker & Docker Compose（部署 API / Worker / Redis / nginx）
-- 已构建本地 CTB 镜像：`cesium-terrain-builder:local`（见上方构建步骤）
-- 本地开发：Python 3.11+
+- 本地开发：Python 3.11+（源码安装需平台 C++17 编译器以构建 native 扩展）
 
 ### 启动
 
@@ -79,7 +78,7 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-默认将 `jobs` / `tilesets` / `uploads` 放在 Docker **命名卷**（Linux FS，加快瓦片读写）；**`source/`（DEM）仍绑在宿主机 `./data/source`**，避免大 DEM 挤占 Docker 默认所在的 C: 虚拟盘。
+默认将 `jobs` / `tilesets` / `uploads` 放在 Docker **命名卷**（Linux FS，加快瓦片读写）；**`source/`（DEM）仍绑在宿主机 `./data/source`**，避免大 DEM 挤占 Docker 默认所在的 C: 虚拟盘。Worker 在进程内切片，**不再挂载 docker.sock / 调用外部 CTB 镜像**。
 
 若本机已有历史 `jobs/tilesets/uploads`，可迁入卷：
 
@@ -95,8 +94,6 @@ docker compose up -d --build
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.host-data.yml up -d --build
 ```
-
-并在 `.env` 中清空 `WORKSPACE_DOCKER_VOLUME`，设置 `HOST_WORKSPACE_DIR`（Windows 例：`D:/workspace/ocean-terrain-handler/data`）。
 
 服务地址：
 
@@ -288,8 +285,7 @@ ocean-terrain-handler/
 │   ├── services/
 │   │   ├── preprocessor.py  # DEM 预处理
 │   │   ├── raster/          # 自研 GeoTIFF / warp / fill-nodata / overview
-│   │   ├── ctb/             # CTB 调度 / 网格 / C++ 热路径
-│   │   ├── ctb_runner.py    # 切片入口
+│   │   ├── ctb/             # 进程内 CTB 调度 / 网格 / C++ 热路径（tiler.py）
 │   │   ├── layer_json.py    # layer.json 生成
 │   │   ├── tile_publisher.py # 瓦片发布注册
 │   │   └── job_store.py     # Redis 任务状态
@@ -316,10 +312,7 @@ ocean-terrain-handler/
 | `CELERY_WORKER_CONCURRENCY` | `1` | Worker 同时处理的任务数；单任务内部已并行 |
 | `CELERY_WORKER_POOL` | 平台默认 | Windows 入口自动使用 `solo` |
 | `WORKSPACE_DIR` | `/data/workspace` | 工作目录 |
-| `WORKSPACE_DOCKER_VOLUME` | `ocean-terrain-handler_workspace_data` | CTB 使用的 Docker 命名卷（Docker Desktop 推荐）；与 `HOST_WORKSPACE_DIR` 二选一 |
-| `HOST_WORKSPACE_DIR` | — | 宿主机 `./data` 绝对路径（仅 host-data 模式；Windows 例：`D:/workspace/ocean-terrain-handler/data`） |
-| `CTB_DOCKER_IMAGE` | `cesium-terrain-builder:local` | 本地自构建 CTB 镜像名 |
-| `GDAL_CACHEMAX` | `512` | Python 预处理缓存 / CTB `GDAL_CACHEMAX` (MB) |
+| `GDAL_CACHEMAX` | `512` | 预处理与进程内切片的窗口读取缓存 (MB) |
 | `JOB_TTL` | `604800` | 任务状态保留 (秒) |
 | `TERRAIN_SERVER_PUBLIC_URL` | `http://localhost:8103` | terrain-server（nginx）对外 URL |
 | `TERRAIN_BASE_PATH` | `/tilesets` | 地形 URL 前缀 |
@@ -332,7 +325,6 @@ ocean-terrain-handler/
 - 输入 DEM 应为海拔高程数据，多波段栅格仅使用第一波段
 - NODATA 必须在切片前填充，否则空值会进入网格高程
 - 大文件建议设置 `start_zoom` / `end_zoom` 分级切片
-- Worker 容器需挂载 `/var/run/docker.sock` 以调用宿主机上的 CTB 镜像
 - 默认 `jobs/tilesets/uploads` 用命名卷，`source/` 仍在宿主机 `./data/source`；历史产物可用 `scripts/migrate-data-to-volume.ps1` 迁入卷
 - `data/tilesets/terrain/`（卷内）在 API 启动时会自动创建
 - 发布通过符号链接注册瓦片，Worker 容器需有创建 symlink 的权限

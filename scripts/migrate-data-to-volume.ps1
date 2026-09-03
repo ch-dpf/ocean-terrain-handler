@@ -58,7 +58,7 @@ Remove-Item -Force $helper -ErrorAction SilentlyContinue
 
 Write-Host ""
 Write-Host "Done. Next:"
-Write-Host "  1. Ensure .env has WORKSPACE_DOCKER_VOLUME=$volumeName"
-Write-Host "  2. docker compose up -d --build"
+Write-Host "  docker compose up -d --build"
+Write-Host "(named volume: $volumeName)"
 Write-Host "Workspace (including DEM under source/) now lives in the named volume."
 Write-Host "To add more DEM later, use: .\scripts\copy-to-workspace-volume.ps1"

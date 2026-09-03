@@ -215,7 +215,9 @@ def _affine_from_geotiff_tags(tags: dict) -> Affine:
     if transform is not None:
         values = [float(v) for v in np.asarray(transform, dtype=np.float64).ravel()]
         if len(values) >= 8:
-            return Affine(a=values[0], b=values[1], c=values[3], d=values[4], e=values[5], f=values[7])
+            return Affine(
+                a=values[0], b=values[1], c=values[3], d=values[4], e=values[5], f=values[7]
+            )
     scale = tags.get("ModelPixelScale")
     tie = tags.get("ModelTiepoint")
     if scale is None or tie is None:
@@ -287,7 +289,9 @@ class GeoTiffReader:
             self._lock = threading.Lock()
             self._cache = _TileCache(cache_bytes)
             self._full: np.ndarray | None = None
-            uncompressed = int(self.width) * int(self.height) * int(self.samples) * int(self.dtype.itemsize)
+            uncompressed = (
+                int(self.width) * int(self.height) * int(self.samples) * int(self.dtype.itemsize)
+            )
             load_full = uncompressed <= cache_bytes
             if preload is False:
                 load_full = False
@@ -331,9 +335,15 @@ class GeoTiffReader:
     def _maybe_add_overview(self, page: tifffile.TiffPage) -> None:
         width = int(page.imagewidth)
         height = int(page.imagelength)
-        if width <= 0 or height <= 0 or width >= self.width or height >= self.height:
+        if (
+            width <= 0
+            or height <= 0
+            or width > self.width
+            or height > self.height
+            or (width == self.width and height == self.height)
+        ):
             return
-        scale = max(1, self.width // width)
+        scale = max(2, round(max(self.width / width, self.height / height)))
         self._overviews.append(_level_from_page(page, scale, self._affine_for_size(width, height)))
 
     @property
@@ -365,6 +375,9 @@ class GeoTiffReader:
         return min(xs), min(ys), max(xs), max(ys)
 
     def close(self) -> None:
+        self._full = None
+        if hasattr(self, "_cache"):
+            self._cache = _TileCache(self._cache.max_bytes)
         if getattr(self, "_ovr_tif", None) is not None:
             try:
                 self._ovr_tif.close()
@@ -435,7 +448,7 @@ class GeoTiffReader:
         if img_r0 >= img_r1 or img_c0 >= img_c1:
             return out
 
-        if lvl.scale == 1 and self._full is not None:
+        if lvl is self._base and self._full is not None:
             out[img_r0 - row0 : img_r1 - row0, img_c0 - col0 : img_c1 - col0] = self._full[
                 img_r0:img_r1, img_c0:img_c1
             ]

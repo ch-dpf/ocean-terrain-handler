@@ -14,6 +14,7 @@ from app.services.ctb.mesh_encode import (
     aggregate_footprints_f32,
     box_average_f32,
     encode_mesh_tile_bytes,
+    fill_nodata_f32,
     native_import_error,
     remap_f32_hwc,
     require_native,
@@ -23,8 +24,12 @@ from app.services.ctb.mesh_encode import (
 def check_native() -> dict[str, object]:
     """Exercise meshing, encoding, gzip wrapping, and aggregate sampling."""
     require_native()
+    hole = np.array([[1.0, 2.0, 3.0], [4.0, np.nan, 6.0], [7.0, 8.0, 9.0]], dtype=np.float32)
+    if not np.isfinite(fill_nodata_f32(hole, 10)).all():
+        raise RuntimeError("native fill-nodata self-check failed")
     size = 65
     heights = np.linspace(0.0, 100.0, size * size, dtype=np.float32).reshape(size, size)
+    heights.flags.writeable = False  # shared sample cache must work with this ABI
     payload = encode_mesh_tile_bytes(
         heights,
         -180.0,

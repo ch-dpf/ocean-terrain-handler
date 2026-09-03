@@ -303,6 +303,47 @@ def grid_dimension(span: float, pixel_size: float) -> int:
     return max(1, math.ceil(span / pixel_size - 1e-12))
 
 
+def suggested_warp_grid(
+    source: CRS,
+    target: CRS,
+    affine: Affine,
+    width: int,
+    height: int,
+) -> tuple[Affine, int, int]:
+    """GDAL-style perimeter/diagonal grid for finite, invertible affine inputs.
+
+    This is the ordinary affine-CRS path, not GDAL's RPC/GCP or projection
+    discontinuity recovery machinery. Keep the requested pixel scale when
+    rounding dimensions, rather than stretching pixels back into the bounds.
+    """
+    steps = min(100, max(20, int(min(width, height) / 50 + 0.5)))
+    f = np.linspace(0.0, 1.0, steps + 1)
+    cols = np.concatenate([f * width, f * width, np.zeros_like(f), np.full_like(f, width)])
+    rows = np.concatenate([np.zeros_like(f), np.full_like(f, height), f * height, f * height])
+    x, y = affine.xy(cols, rows)
+    transformer = make_transformer(source, target)
+    tx, ty = transform_xy(transformer, x, y)
+    _require_finite(tx, ty)
+    left, right, bottom, top = float(tx.min()), float(tx.max()), float(ty.min()), float(ty.max())
+    dx, dy = float(tx[-1] - tx[0]), float(ty[-1] - ty[0])
+    if dx == 0 or dy == 0:
+        dx, dy = right - left, top - bottom
+    pixel = math.hypot(dx, dy) / math.hypot(width, height)
+    if not math.isfinite(pixel) or pixel <= 0:
+        raise RasterError("Destination pixel size is invalid")
+    out_w = max(1, int((right - left) / pixel + 0.5))
+    out_h = max(1, int((top - bottom) / pixel + 0.5))
+    if out_w > 2_000_000 or out_h > 2_000_000:
+        raise RasterError(f"Destination raster too large: {out_w}x{out_h}")
+    px = py = pixel
+    if crs_epsg(target) == 4326:
+        if right <= 180 and left + out_w * px > 180:
+            px = (180 - left) / out_w
+        if bottom >= -90 and top - out_h * py < -90:
+            py = (top + 90) / out_h
+    return Affine.north_up(left, top, px, py), out_w, out_h
+
+
 def wgs84_bounds_from_rect(
     crs: CRS,
     bounds: tuple[float, float, float, float],

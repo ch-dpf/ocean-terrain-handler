@@ -36,11 +36,18 @@ from app.services.ctb.tiler import (
     level_zero_geometric_error,
     run_ctb_tile,
 )
+from app.services.ctb.sample import sanitize_tile_heights
 from tests.raster_fixtures import write_dem_geotiff_4326
 
 _SKIP_WITHOUT_NATIVE = pytest.mark.skipif(
     not native_available(), reason="CTB native extension not built"
 )
+
+
+def test_sanitize_tile_heights_replaces_nodata_with_ellipsoid():
+    heights = np.array([[10.0, -9999.0], [np.nan, -32768.0]], dtype=np.float32)
+    cleaned = sanitize_tile_heights(heights, -9999.0)
+    np.testing.assert_array_equal(cleaned, np.array([[10.0, 0.0], [0.0, 0.0]], dtype=np.float32))
 
 
 def test_geodetic_z0_eastern_hemisphere_bounds():
@@ -161,7 +168,12 @@ def test_run_ctb_tile_mesh_writes_gzip_terrain_and_layer_json(tmp_path: Path):
     assert layer["extensions"] == ["octvertexnormals"]
     assert layer["available"][0][0]["startX"] == 0
     assert layer["available"][0][0]["endX"] == 1
-
+    # DEM extent (32 * 0.01°), not the z0 eastern-hemisphere tile rectangle.
+    assert layer["bounds"] == pytest.approx([116.0, 39.68, 116.32, 40.0])
+    # Quantized-mesh header: center(3*f64) + min/max height (2*f32) at offset 24.
+    min_h, max_h = struct.unpack_from("<ff", raw, 24)
+    assert min_h >= -1.0
+    assert max_h < 500.0
 
 @_SKIP_WITHOUT_NATIVE
 def test_run_ctb_tile_heightmap_and_layer_only(tmp_path: Path):

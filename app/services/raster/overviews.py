@@ -1,4 +1,4 @@
-"""Build reduced-resolution GeoTIFF overviews (replacement for ``gdal raster overview add``)."""
+"""Build GDAL-compatible average overview dimensions and pixel footprints."""
 
 from __future__ import annotations
 
@@ -8,12 +8,25 @@ from pathlib import Path
 import numpy as np
 import tifffile
 
+from app.services.raster.affine import Affine
 from app.services.raster.geotiff import GeoTiffReader, geotiff_extratags, tiff_compression
-from app.services.raster.parallel import default_workers, ordered_parallel_map
-from app.services.raster.resample import average_downsample, cast_sampled
+from app.services.raster.parallel import ordered_parallel_map, raster_workers
+from app.services.raster.resample import cast_sampled, sample_footprint
 
 ProgressFn = Callable[[float, str | None], None]
 DEFAULT_LEVELS = (2, 4, 8, 16)
+
+
+def overview_shapes(width: int, height: int, levels: tuple[int, ...] = DEFAULT_LEVELS):
+    """Unique reduced sizes, in increasing reduction order, preserving tails."""
+    seen = set()
+    for level in sorted(set(levels)):
+        if level < 2:
+            raise ValueError("overview factors must be >= 2")
+        w, h = (width + level - 1) // level, (height + level - 1) // level
+        if (w, h) != (width, height) and (w, h) not in seen:
+            seen.add((w, h))
+            yield level, h, w
 
 
 def add_overviews(
@@ -27,90 +40,113 @@ def add_overviews(
     workers: int | None = None,
     on_progress: ProgressFn | None = None,
 ) -> Path | None:
-    """Write ``dataset.tif.ovr`` with average-resampled pyramid levels."""
+    """Stream each average level, cascading from the preceding completed level."""
     ovr_path = Path(str(dataset) + ".ovr")
     if ovr_path.exists():
         ovr_path.unlink()
-
-    with GeoTiffReader(dataset, cache_bytes=cache_bytes) as src:
-        valid_levels = [level for level in levels if src.width // level >= 1 and src.height // level >= 1]
-        if not valid_levels:
+    with GeoTiffReader(dataset, cache_bytes=max(1, cache_bytes // 2), preload=False) as base:
+        specs = list(overview_shapes(base.width, base.height, levels))
+        if not specs:
             return None
-        thread_count = default_workers() if workers is None else max(1, int(workers))
-        planned_pixels = 0
-        specs: list[tuple[int, int, int]] = []
-        for level in valid_levels:
-            out_w = max(1, src.width // level)
-            out_h = max(1, src.height // level)
-            specs.append((level, out_h, out_w))
-            planned_pixels += out_w * out_h
-        planned_pixels = max(1, planned_pixels)
-        done_pixels = 0
+        planned = sum(h * w for _, h, w in specs)
+        done = 0
         codec, codec_args = tiff_compression(compress, jpeg_quality)
-        nodata = src.nodata
-        dtype = src.dtype
-
+        dtype, nodata = base.dtype, base.nodata
         with tifffile.TiffWriter(ovr_path, bigtiff=True) as tif:
-            for level, out_h, out_w in specs:
-                n_ty = (out_h + block_size - 1) // block_size
-                n_tx = (out_w + block_size - 1) // block_size
-                affine = src.affine.scaled(level)
+            for index, (_, out_h, out_w) in enumerate(specs):
+                # Previously completed pages are flushed before reopening.
+                src = (
+                    base
+                    if index == 0
+                    else GeoTiffReader(dataset, cache_bytes=max(1, cache_bytes // 2), preload=False)
+                )
+                try:
+                    source_level = src.select_level(src.width, src.height, out_w, out_h)
+                    sx, sy = source_level.width / out_w, source_level.height / out_h
+                    thread_count = raster_workers(
+                        cache_bytes, int(block_size * block_size * (64 + 16 * sx * sy)), workers
+                    )
+                    ax, ay = base.width / out_w, base.height / out_h
+                    a = base.affine
+                    affine = Affine(a.a * ax, a.b * ay, a.c, a.d * ax, a.e * ay, a.f)
 
-                def tiles(
-                    level: int = level,
-                    out_h: int = out_h,
-                    out_w: int = out_w,
-                    n_ty: int = n_ty,
-                    n_tx: int = n_tx,
-                ) -> Iterator[np.ndarray]:
-                    nonlocal done_pixels
-                    coords = [(ty, tx) for ty in range(n_ty) for tx in range(n_tx)]
-
-                    def _compute_tile(coord: tuple[int, int]) -> np.ndarray:
-                        ty, tx = coord
-                        r0 = ty * block_size
-                        c0 = tx * block_size
-                        sl_h = min(block_size, out_h - r0)
-                        sl_w = min(block_size, out_w - c0)
-                        src_r0 = r0 * level
-                        src_c0 = c0 * level
-                        src_h = min(src.height - src_r0, sl_h * level)
-                        src_w = min(src.width - src_c0, sl_w * level)
-                        window = src.read_window(src_r0, src_c0, src_h, src_w)[:, :, :1]
-                        resized = average_downsample(window, sl_h, sl_w, nodata=nodata)
-                        resized = cast_sampled(resized, dtype, nodata=nodata)
-                        full = np.zeros((block_size, block_size, 1), dtype=dtype)
-                        if nodata is not None:
-                            full[:] = nodata
-                        full[:sl_h, :sl_w] = resized
-                        return full
-
-                    for coord, full in zip(
-                        coords, ordered_parallel_map(coords, _compute_tile, workers=thread_count)
+                    def compute(
+                        coord,
+                        out_h=out_h,
+                        out_w=out_w,
+                        sx=sx,
+                        sy=sy,
+                        source_level=source_level,
+                        src=src,
                     ):
-                        ty, tx = coord
-                        sl_h = min(block_size, out_h - ty * block_size)
-                        sl_w = min(block_size, out_w - tx * block_size)
-                        done_pixels += sl_h * sl_w
-                        if on_progress is not None:
-                            on_progress(100.0 * done_pixels / planned_pixels, "overview add")
-                        yield full[:, :, 0]
+                        r0, c0 = coord
+                        h, w = min(block_size, out_h - r0), min(block_size, out_w - c0)
+                        rr, cc = int(np.floor(r0 * sy)), int(np.floor(c0 * sx))
+                        rh = min(source_level.height, int(np.ceil((r0 + h) * sy))) - rr
+                        cw = min(source_level.width, int(np.ceil((c0 + w) * sx))) - cc
+                        window = src.read_window(rr, cc, rh, cw, level=source_level)[:, :, 0]
+                        cols, rows = np.meshgrid(
+                            (np.arange(c0, c0 + w + 1) * sx) - cc,
+                            (np.arange(r0, r0 + h + 1) * sy) - rr,
+                        )
+                        resized = sample_footprint(window, rows, cols, "average", nodata=nodata)
+                        # GDAL 3.12's no-mask 2-column fast path uses an
+                        # unweighted 2x2 mean when a row intersects two source
+                        # rows, including a fractional first/last row.
+                        if nodata is None and sx == 2.0:
+                            for j in range(h):
+                                y0 = int((r0 + j) * sy + 1e-8)
+                                y1 = min(
+                                    source_level.height, int(np.ceil((r0 + j + 1) * sy - 1e-8))
+                                )
+                                if y1 - y0 == 2:
+                                    values = window[y0 - rr : y1 - rr, : 2 * w].reshape(2, w, 2)
+                                    if np.isfinite(values).all():
+                                        resized[j] = values.mean(axis=(0, 2), dtype=np.float64)
+                        typed = cast_sampled(resized, dtype, nodata=nodata)
+                        full = np.full(
+                            (block_size, block_size), 0 if nodata is None else nodata, dtype=dtype
+                        )
+                        full[:h, :w] = typed
+                        return h * w, full
 
-                kwargs: dict = {
-                    "shape": (out_h, out_w),
-                    "dtype": dtype,
-                    "photometric": "minisblack",
-                    "tile": (block_size, block_size),
-                    "extratags": geotiff_extratags(src.crs, affine, nodata=nodata),
-                    "software": "ocean-terrain-handler",
-                    "metadata": None,
-                }
-                if codec is not None:
-                    kwargs["compression"] = codec
-                    if codec_args:
-                        kwargs["compressionargs"] = codec_args
-                tif.write(tiles(), **kwargs)
+                    def tiles(
+                        out_h=out_h, out_w=out_w, thread_count=thread_count, compute=compute
+                    ) -> Iterator[np.ndarray]:
+                        nonlocal done
+                        coords = (
+                            (r, c)
+                            for r in range(0, out_h, block_size)
+                            for c in range(0, out_w, block_size)
+                        )
+                        for pixels, full in ordered_parallel_map(
+                            coords, compute, workers=thread_count
+                        ):
+                            done += pixels
+                            if on_progress is not None:
+                                on_progress(100.0 * done / planned, "overview add")
+                            yield full
 
+                    kwargs = {
+                        "shape": (out_h, out_w),
+                        "dtype": dtype,
+                        "photometric": "minisblack",
+                        "tile": (block_size, block_size),
+                        "subfiletype": 1,
+                        "extratags": geotiff_extratags(base.crs, affine, nodata=nodata),
+                        "software": "ocean-terrain-handler",
+                        "metadata": None,
+                    }
+                    if codec is not None:
+                        kwargs["compression"] = codec
+                        if codec_args:
+                            kwargs["compressionargs"] = codec_args
+                    tif.write(tiles(), **kwargs)
+                    tif.filehandle.flush()
+                finally:
+                    # Metadata remains available, but no previous level's cache
+                    # should compete with the next reader's half-budget.
+                    src.close()
     if on_progress is not None:
         on_progress(100.0, "overview complete")
-    return ovr_path if ovr_path.is_file() else None
+    return ovr_path

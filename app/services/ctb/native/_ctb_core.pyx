@@ -7,6 +7,23 @@ from cpython.bytes cimport PyBytes_FromStringAndSize
 
 import numpy as np
 
+cdef extern from "fill_nodata.hpp" namespace "ctb_native":
+    void fill_nodata(const float* src, int h, int w, int radius, float* out) except + nogil
+
+
+def fill_nodata_f32(object data, int radius):
+    """GDAL-compatible quadrant IDW; NaN marks invalid original donors."""
+    cdef object src = np.ascontiguousarray(data, dtype=np.float32)
+    if src.ndim != 2 or src.shape[0] < 1 or src.shape[1] < 1 or radius < 1:
+        raise ValueError("fill requires a non-empty 2D array and positive radius")
+    cdef int h = src.shape[0], w = src.shape[1]
+    cdef object output = np.empty((h, w), dtype=np.float32)
+    cdef float[:, ::1] sv = src
+    cdef float[:, ::1] ov = output
+    with nogil:
+        fill_nodata(&sv[0, 0], h, w, radius, &ov[0, 0])
+    return output
+
 cdef extern from "mesh_tile.hpp" namespace "ctb_native":
     string encode_mesh_tile(
         const float* heights,
@@ -19,6 +36,8 @@ cdef extern from "mesh_tile.hpp" namespace "ctb_native":
         cpp_bool smooth_small_zooms,
         const float* const* neighbor_heights,
         cpp_bool write_vertex_normals,
+        cpp_bool web_mercator,
+        cpp_bool canonical_edges,
     ) except + nogil
     string encode_heightmap_tile(
         const float* heights,
@@ -70,7 +89,7 @@ cdef const float* _optional_square(object array, int tile_size, object holders):
     if contiguous.ndim != 2 or contiguous.shape[0] != tile_size or contiguous.shape[1] != tile_size:
         raise ValueError("neighbor height grid must be square tile_size x tile_size")
     holders.append(contiguous)
-    cdef float[:, ::1] view = contiguous
+    cdef const float[:, ::1] view = contiguous
     return &view[0, 0]
 
 
@@ -87,6 +106,8 @@ def encode_mesh_tile_bytes(
     object neighbor_right,
     object neighbor_bottom,
     bint write_vertex_normals,
+    bint web_mercator=False,
+    bint canonical_edges=False,
 ):
     """Return uncompressed quantized-mesh bytes. Caller gzip-compresses with stdlib."""
     cdef object grid = np.ascontiguousarray(heights, dtype=np.float32)
@@ -96,7 +117,7 @@ def encode_mesh_tile_bytes(
     cdef int edge = tile_size - 1
     if tile_size < 3 or (edge & (edge - 1)) != 0:
         raise ValueError("heightfield size must be 2^n + 1")
-    cdef float[:, ::1] view = grid
+    cdef const float[:, ::1] view = grid
     cdef object holders = []
     cdef const float* neighbors[4]
     neighbors[0] = _optional_square(neighbor_left, tile_size, holders)
@@ -116,6 +137,8 @@ def encode_mesh_tile_bytes(
             smooth_small_zooms,
             neighbors,
             write_vertex_normals,
+            web_mercator,
+            canonical_edges,
         )
     return PyBytes_FromStringAndSize(payload.data(), payload.size())
 
@@ -126,7 +149,7 @@ def encode_heightmap_tile_bytes(object heights, int children):
         raise ValueError("heightmap requires a non-empty 2D array")
     cdef int rows = <int> grid.shape[0]
     cdef int cols = <int> grid.shape[1]
-    cdef float[:, ::1] view = grid
+    cdef const float[:, ::1] view = grid
     cdef string payload
     with nogil:
         payload = encode_heightmap_tile(

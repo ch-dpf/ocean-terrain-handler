@@ -87,12 +87,16 @@ PIL_RESAMPLING = {
     RESAMPLE_AVERAGE: Image.Resampling.BOX,
 }
 
-_CV2_INTER = None if cv2 is None else {
-    RESAMPLE_NEAREST: cv2.INTER_NEAREST,
-    RESAMPLE_BILINEAR: cv2.INTER_LINEAR,
-    RESAMPLE_CUBIC: cv2.INTER_CUBIC,
-    RESAMPLE_LANCZOS: cv2.INTER_LANCZOS4,
-}
+_CV2_INTER = (
+    None
+    if cv2 is None
+    else {
+        RESAMPLE_NEAREST: cv2.INTER_NEAREST,
+        RESAMPLE_BILINEAR: cv2.INTER_LINEAR,
+        RESAMPLE_CUBIC: cv2.INTER_CUBIC,
+        RESAMPLE_LANCZOS: cv2.INTER_LANCZOS4,
+    }
+)
 
 
 def normalize_resampling(method: str | ResamplingMethod) -> str:
@@ -214,7 +218,12 @@ def sample_bilinear(src: np.ndarray, rows: np.ndarray, cols: np.ndarray) -> np.n
     s11 = src[r1c, c1c]
     drg = dr[..., np.newaxis]
     dcg = dc[..., np.newaxis]
-    out = s00 * (1.0 - drg) * (1.0 - dcg) + s01 * (1.0 - drg) * dcg + s10 * drg * (1.0 - dcg) + s11 * drg * dcg
+    out = (
+        s00 * (1.0 - drg) * (1.0 - dcg)
+        + s01 * (1.0 - drg) * dcg
+        + s10 * drg * (1.0 - dcg)
+        + s11 * drg * dcg
+    )
     out[~valid] = 0
     return out
 
@@ -528,7 +537,8 @@ def cast_sampled(sampled: np.ndarray, dtype: np.dtype, *, nodata: float | None) 
         info = np.iinfo(dtype)
         fill = 0 if nodata is None or (isinstance(nodata, float) and np.isnan(nodata)) else nodata
         filled = np.where(invalid, fill, sampled)
-        out = np.rint(filled).clip(info.min, info.max).astype(dtype)
+        rounded = np.copysign(np.floor(np.abs(filled.astype(np.float64)) + 0.5), filled)
+        out = rounded.clip(info.min, info.max).astype(dtype)
         if nodata is not None and not (isinstance(nodata, float) and np.isnan(nodata)):
             out[invalid] = dtype.type(int(nodata))
         return out

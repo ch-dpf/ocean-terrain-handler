@@ -38,6 +38,7 @@ docker run --rm \
     ls /to/source | wc -l'
 
 echo
-echo "Done. Set WORKSPACE_DOCKER_VOLUME=$VOLUME_NAME then: docker compose up -d --build"
+echo "Done. Named volume: $VOLUME_NAME"
+echo "Next: docker compose up -d --build"
 echo "Workspace (including source/) lives in the named volume."
 echo "To add more DEM later: sh scripts/copy-to-workspace-volume.sh <host-path> [dest-rel]"

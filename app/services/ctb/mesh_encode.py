@@ -45,6 +45,13 @@ def require_native() -> None:
         raise RuntimeError(f"{_NATIVE_REQUIRED} ({detail})")
 
 
+def fill_nodata_f32(source: np.ndarray, radius: int) -> np.ndarray:
+    require_native()
+    if not hasattr(_native_module, "fill_nodata_f32"):
+        raise RuntimeError("CTB extension is outdated; rebuild the native wheel for preprocessing")
+    return _native_module.fill_nodata_f32(source, radius)
+
+
 def aggregate_footprints_f32(
     source: np.ndarray,
     corner_rows: np.ndarray,
@@ -95,6 +102,8 @@ def encode_mesh_tile_bytes(
     smooth_small_zooms: bool,
     neighbors: Mapping[int, np.ndarray] | None,
     write_vertex_normals: bool,
+    web_mercator: bool = False,
+    canonical_edges: bool = False,
 ) -> bytes:
     """Encode one quantized-mesh tile in C++."""
     require_native()
@@ -112,6 +121,8 @@ def encode_mesh_tile_bytes(
         mapping.get(2),
         mapping.get(3),
         write_vertex_normals,
+        web_mercator,
+        canonical_edges,
     )
     return gzip_terrain(raw)
 

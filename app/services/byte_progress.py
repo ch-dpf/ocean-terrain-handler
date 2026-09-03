@@ -9,6 +9,7 @@ from pathlib import Path
 from pyproj import CRS
 
 from app.schemas import CtbOptions, PreprocessOptions, Profile
+from app.services.ctb.constants import GEODETIC_DEFAULT_TILE_SIZE, MERCATOR_DEFAULT_TILE_SIZE
 from app.services.raster.affine import Affine
 from app.services.raster.crsutil import (
     EARTH_HALF,
@@ -19,9 +20,8 @@ from app.services.raster.crsutil import (
     parse_crs,
     wgs84_bounds_from_rect,
 )
-from app.services.ctb.constants import GEODETIC_DEFAULT_TILE_SIZE, MERCATOR_DEFAULT_TILE_SIZE
 from app.services.raster.geotiff import GeoTiffReader
-from app.services.raster.overviews import DEFAULT_LEVELS
+from app.services.raster.overviews import DEFAULT_LEVELS, overview_shapes
 from app.services.raster.reproject import plan_destination_grid
 
 # ctb-tile geodetic default when ``-t`` / tile_size is omitted.
@@ -40,11 +40,8 @@ def overview_bytes(
     levels: tuple[int, ...] = DEFAULT_LEVELS,
 ) -> int:
     total = 0
-    for level in levels:
-        out_w = width // level
-        out_h = height // level
-        if out_w >= 1 and out_h >= 1:
-            total += raster_bytes(out_w, out_h, samples, itemsize)
+    for _, out_h, out_w in overview_shapes(width, height, levels):
+        total += raster_bytes(out_w, out_h, samples, itemsize)
     return total
 
 
@@ -99,7 +96,12 @@ def _xyz_range_mercator(bounds_wgs84: list[float], z: int) -> tuple[int, int, in
     x0, y0 = _lonlat_to_mercator_tile(west, north, z)
     x1, y1 = _lonlat_to_mercator_tile(east, south, z)
     n = 2**z
-    return max(0, min(x0, x1)), min(n - 1, max(x0, x1)), max(0, min(y0, y1)), min(n - 1, max(y0, y1))
+    return (
+        max(0, min(x0, x1)),
+        min(n - 1, max(x0, x1)),
+        max(0, min(y0, y1)),
+        min(n - 1, max(y0, y1)),
+    )
 
 
 def _xyz_range_geodetic(bounds_wgs84: list[float], z: int) -> tuple[int, int, int, int]:
@@ -110,7 +112,12 @@ def _xyz_range_geodetic(bounds_wgs84: list[float], z: int) -> tuple[int, int, in
     x1 = int(math.floor((east + 180.0) / 360.0 * n_x))
     y0 = int(math.floor((90.0 - north) / 180.0 * n_y))
     y1 = int(math.floor((90.0 - south) / 180.0 * n_y))
-    return max(0, min(x0, x1)), min(n_x - 1, max(x0, x1)), max(0, min(y0, y1)), min(n_y - 1, max(y0, y1))
+    return (
+        max(0, min(x0, x1)),
+        min(n_x - 1, max(x0, x1)),
+        max(0, min(y0, y1)),
+        min(n_y - 1, max(y0, y1)),
+    )
 
 
 def count_tiles_at_zoom(bounds_wgs84: list[float], z: int, profile: Profile) -> int:
@@ -201,7 +208,9 @@ def plan_pipeline_bytes(
         itemsize = int(src.dtype.itemsize)
         reproject = raster_bytes(width, height, samples, itemsize)
         fill_nodata = reproject if preprocess.fill_nodata else 0
-        overviews = overview_bytes(width, height, samples, itemsize) if preprocess.build_overviews else 0
+        overviews = (
+            overview_bytes(width, height, samples, itemsize) if preprocess.build_overviews else 0
+        )
         dest_bounds = _affine_bounds(affine, width, height)
         wgs84 = parse_crs("EPSG:4326")
         wgs_px, wgs_py = destination_pixel_size(dst_crs, wgs84, affine, width, height)
@@ -210,11 +219,15 @@ def plan_pipeline_bytes(
         )
         min_zoom = int(ctb.end_zoom) if ctb.end_zoom is not None else 0
         max_zoom = _max_zoom_for_grid(dst_crs, affine, width, height, ctb)
-        n_tiles = 0 if ctb.layer_only else count_terrain_tiles(
-            bounds_wgs84,
-            profile=ctb.profile,
-            min_zoom=min_zoom,
-            max_zoom=max_zoom,
+        n_tiles = (
+            0
+            if ctb.layer_only
+            else count_terrain_tiles(
+                bounds_wgs84,
+                profile=ctb.profile,
+                min_zoom=min_zoom,
+                max_zoom=max_zoom,
+            )
         )
         tiles = n_tiles * raster_bytes(ctb_tile_size(ctb), ctb_tile_size(ctb), samples, itemsize)
         return ByteBudget(
