@@ -44,7 +44,9 @@
 - quantized-mesh-1.0（ECEF、包围球、地平遮挡点、zigzag、边索引、oct 法线）与 heightmap-1.0（C++ 编码；gzip 用 Python 标准库）
 - `-C` CesiumJS 缺根瓦片补齐
 
-栅格采进瓦片使用本库 Python warp（精确反算；`error_threshold` 仅为兼容 CTB 选项，不做 GDAL 近似变换）。C++ 扩展是标准 C++17，不链系统 zlib；`setup.py` 按 MSVC / gcc / clang 选编译参数。镜像构建时编译；本机 Win/macOS/Linux 有编译器时 `python setup.py build_ext --inplace` 同样得到 C++ 快路径。未编译时走同一套 Python 参考实现，不引入 `ctb-tile` 或 `docker.sock`。
+栅格采进瓦片使用本库 Python warp（与 [ocean-imagery-handler](https://github.com/ch-dpf/ocean-imagery-handler/tree/master-zy) 同一套窗口读取 / overview，用来扛大 TIF）。BTT meshing 与网格编码必须走 C++ 扩展，**没有可用的 Python 生产回退**。
+
+和影像库一样：**不要在每台机器上现场编译**。`docker compose build` 时按**当前镜像的 CPU 架构**编进镜像，同架构机器直接拉镜像跑。换架构（例如 amd64 → arm64）再构建一份该架构的镜像（`docker buildx --platform`），不是每台机器编一次。
 
 | `output_format` | layer.json format | 说明 |
 |-----------------|-------------------|------|
@@ -258,7 +260,7 @@ uvicorn app.main:app --reload --port 8000
 celery -A app.worker.celery_app worker --loglevel=info
 ```
 
-Worker 镜像基于 `python:3.12-slim`，预处理为自研 Python 栅格引擎，切片为进程内 CTB（C++ meshing/编码，gzip 用标准库）。不调用 GDAL 命令行，也不通过 `docker.sock` 启动 `ctb-tile`。本机启用 C++ 快路径：Linux/`g++`、macOS/`clang`、Windows/MSVC Build Tools 后执行 `python setup.py build_ext --inplace`。
+Worker 镜像与影像库相同：`python:3.12-slim` + 自研栅格引擎。差别是地形镜像在 **build 时**编入 CTB C++ 扩展（该镜像的 OS/CPU）。运行时不调用 GDAL CLI，也不通过 `docker.sock` 启动 `ctb-tile`。同架构机器共用这一份镜像，无需再编译。
 
 预览与瓦片发布需单独启动 nginx（或使用 `docker compose up terrain-server`）。
 
@@ -305,7 +307,7 @@ ocean-terrain-handler/
 
 ## 注意事项
 
-- Worker 走进程内切片（C++ meshing/编码；扩展未编译时用同算法的 Python 参考实现），不挂 `docker.sock`、不启动 `ctb-tile`
+- 切片必须使用镜像里编好的 C++ 扩展（大 DEM 不能走 Python meshing）。推荐 `docker compose build`，与影像库一样按镜像交付，不要在每台业务机上编译
 - 默认输出 `output_format: "Mesh"`（quantized-mesh）；若需 heightmap 再设为 `"Terrain"`
 - 输入 DEM 应为海拔高程数据，多波段栅格仅使用第一波段
 - NODATA 必须在切片前填充，否则空值会进入网格高程

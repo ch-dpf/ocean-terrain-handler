@@ -1,4 +1,8 @@
-"""Mesh + encode facade: Cython/C++ when built, Python reference otherwise."""
+"""Mesh + encode: production uses the C++ extension only.
+
+Python heightfield/encode stay as a test reference (``use_native=False``).
+They are not a fallback for large DEM jobs.
+"""
 
 from __future__ import annotations
 
@@ -12,21 +16,23 @@ from app.services.ctb.heightfield import HeightField, MeshBuilder
 
 logger = logging.getLogger(__name__)
 
+_NATIVE_REQUIRED = (
+    "CTB C++ extension is required for tiling (Python meshing cannot handle large DEM jobs). "
+    "Use the Docker image (compiled at build) or: python setup.py build_ext --inplace"
+)
+
 _native_module = None
 _native_import_error: str | None = None
 try:
     from app.services.ctb import _ctb_core as _native_module
-except Exception as exc:  # pragma: no cover - depends on local compile
+except Exception as exc:  # pragma: no cover - depends on image/local compile
     _native_import_error = str(exc)
     _native_module = None
 
 if _native_module is not None:
     logger.info("CTB meshing/encoding: Cython/C++ extension")
 else:
-    logger.warning(
-        "CTB meshing/encoding: Python reference (%s). Build with: python setup.py build_ext --inplace",
-        _native_import_error or "extension not built",
-    )
+    logger.error("%s (%s)", _NATIVE_REQUIRED, _native_import_error or "extension not built")
 
 
 def native_available() -> bool:
@@ -35,6 +41,12 @@ def native_available() -> bool:
 
 def native_import_error() -> str | None:
     return _native_import_error
+
+
+def require_native() -> None:
+    if _native_module is None:
+        detail = _native_import_error or "extension not built"
+        raise RuntimeError(f"{_NATIVE_REQUIRED} ({detail})")
 
 
 def _python_mesh_encode(
@@ -78,15 +90,11 @@ def encode_mesh_tile_bytes(
     neighbors: Mapping[int, np.ndarray] | None,
     write_vertex_normals: bool,
     *,
-    use_native: bool | None = None,
+    use_native: bool = True,
 ) -> bytes:
-    """Encode one quantized-mesh tile. Default uses C++ when the extension loaded."""
-    prefer_native = native_available() if use_native is None else bool(use_native)
-    if prefer_native:
-        if _native_module is None:
-            raise RuntimeError("CTB native extension is not available")
-        mapping = neighbors or {}
-        raw = _native_module.encode_mesh_tile_bytes(
+    """Encode one quantized-mesh tile. Production always uses C++ (``use_native=True``)."""
+    if not use_native:
+        return _python_mesh_encode(
             heights,
             minx,
             miny,
@@ -94,14 +102,12 @@ def encode_mesh_tile_bytes(
             maxy,
             geometric_error,
             smooth_small_zooms,
-            mapping.get(0),
-            mapping.get(1),
-            mapping.get(2),
-            mapping.get(3),
+            neighbors,
             write_vertex_normals,
         )
-        return gzip_terrain(raw)
-    return _python_mesh_encode(
+    require_native()
+    mapping = neighbors or {}
+    raw = _native_module.encode_mesh_tile_bytes(
         heights,
         minx,
         miny,
@@ -109,20 +115,22 @@ def encode_mesh_tile_bytes(
         maxy,
         geometric_error,
         smooth_small_zooms,
-        neighbors,
+        mapping.get(0),
+        mapping.get(1),
+        mapping.get(2),
+        mapping.get(3),
         write_vertex_normals,
     )
+    return gzip_terrain(raw)
 
 
 def encode_heightmap_tile_bytes(
     heights: np.ndarray,
     children: int,
     *,
-    use_native: bool | None = None,
+    use_native: bool = True,
 ) -> bytes:
-    prefer_native = native_available() if use_native is None else bool(use_native)
-    if prefer_native:
-        if _native_module is None:
-            raise RuntimeError("CTB native extension is not available")
-        return gzip_terrain(_native_module.encode_heightmap_tile_bytes(heights, int(children)))
-    return encode_heightmap(heights, children)
+    if not use_native:
+        return encode_heightmap(heights, children)
+    require_native()
+    return gzip_terrain(_native_module.encode_heightmap_tile_bytes(heights, int(children)))
