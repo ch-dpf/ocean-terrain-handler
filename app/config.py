@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     celery_broker_url: str = "redis://localhost:6379/0"
     celery_result_backend: str = "redis://localhost:6379/1"
+    celery_worker_concurrency: int = 1
+    celery_worker_pool: str | None = None
 
     workspace_dir: Path = Path("/data/workspace")
     # Raster tile-decode cache (MB) for the Python raster engine and CTB tiler.

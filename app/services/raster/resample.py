@@ -1,4 +1,4 @@
-"""Resampling helpers implemented in numpy / Pillow (no GDAL)."""
+"""Resampling helpers. Production kernels run in the CTB C++ extension."""
 
 from __future__ import annotations
 
@@ -59,6 +59,24 @@ AGGREGATE_RESAMPLING = {
     RESAMPLE_MED,
     RESAMPLE_Q1,
     RESAMPLE_Q3,
+}
+
+_NATIVE_AGGREGATE_CODES = {
+    RESAMPLE_AVERAGE: 0,
+    RESAMPLE_MODE: 1,
+    RESAMPLE_MAX: 2,
+    RESAMPLE_MIN: 3,
+    RESAMPLE_MED: 4,
+    RESAMPLE_Q1: 5,
+    RESAMPLE_Q3: 6,
+}
+
+_NATIVE_KERNEL_CODES = {
+    RESAMPLE_NEAREST: 0,
+    RESAMPLE_BILINEAR: 1,
+    RESAMPLE_CUBIC: 2,
+    RESAMPLE_CUBICSPLINE: 3,
+    RESAMPLE_LANCZOS: 4,
 }
 
 PIL_RESAMPLING = {
@@ -161,7 +179,7 @@ def _ensure_hwc(src: np.ndarray) -> np.ndarray:
 
 def sample_nearest(src: np.ndarray, rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
     src = _ensure_hwc(src)
-    height, width, bands = src.shape
+    height, width, _bands = src.shape
     ri = np.rint(rows).astype(np.int32)
     ci = np.rint(cols).astype(np.int32)
     valid = (ri >= 0) & (ri < height) & (ci >= 0) & (ci < width)
@@ -339,7 +357,7 @@ def _aggregate_values(values: np.ndarray, kind: str, fill: float) -> float:
     raise ValueError(f"resampling {kind!r} is not an aggregate method")
 
 
-def sample_footprint(
+def _sample_footprint_reference(
     src: np.ndarray,
     corner_rows: np.ndarray,
     corner_cols: np.ndarray,
@@ -347,10 +365,10 @@ def sample_footprint(
     *,
     nodata: float | None = None,
 ) -> np.ndarray:
-    """Aggregate source pixels covering each destination pixel footprint.
+    """Slow Python reference used to validate the native implementation.
 
     ``corner_rows`` / ``corner_cols`` are ``(H+1, W+1)`` source PixelIsArea
-    coordinates of destination-pixel corners (GDAL Average/Max/Min/Med/Q1/Q3/Mode).
+    coordinates of destination-pixel corners.
     """
     kind = normalize_resampling(method)
     if kind not in AGGREGATE_RESAMPLING:
@@ -395,6 +413,49 @@ def sample_footprint(
     return out
 
 
+def sample_footprint(
+    src: np.ndarray,
+    corner_rows: np.ndarray,
+    corner_cols: np.ndarray,
+    method: str,
+    *,
+    nodata: float | None = None,
+) -> np.ndarray:
+    """Aggregate source pixels intersecting each destination pixel.
+
+    The production kernel is C++ and runs without the GIL. ``average`` weights
+    each source value by its area of intersection with the destination
+    quadrilateral, matching the semantics CTB obtains from ``GRA_Average`` for
+    the north-up affine path.
+    """
+    kind = normalize_resampling(method)
+    if kind not in AGGREGATE_RESAMPLING:
+        raise ValueError(f"resampling {kind!r} is not an aggregate method")
+    source = np.ascontiguousarray(src, dtype=np.float32)
+    if source.ndim != 2:
+        raise ValueError("sample_footprint expects a 2D source band")
+    if nodata is not None:
+        invalid = nodata_mask(source, nodata)
+        if np.any(invalid):
+            source = source.copy()
+            source[invalid] = np.nan
+    fill = (
+        np.float32("nan")
+        if nodata is None or (isinstance(nodata, float) and np.isnan(nodata))
+        else np.float32(nodata)
+    )
+    # Lazy import avoids coupling the raster module import graph to CTB setup.
+    from app.services.ctb.mesh_encode import aggregate_footprints_f32
+
+    return aggregate_footprints_f32(
+        source,
+        np.ascontiguousarray(corner_rows, dtype=np.float64),
+        np.ascontiguousarray(corner_cols, dtype=np.float64),
+        _NATIVE_AGGREGATE_CODES[kind],
+        float(fill),
+    )
+
+
 def upsample2d(array: np.ndarray, out_h: int, out_w: int) -> np.ndarray:
     """Bilinear-upsample a 2D float grid to (out_h, out_w)."""
     src = np.ascontiguousarray(array.astype(np.float32, copy=False))
@@ -410,34 +471,19 @@ def upsample2d(array: np.ndarray, out_h: int, out_w: int) -> np.ndarray:
 
 
 def remap_array(src: np.ndarray, map_x: np.ndarray, map_y: np.ndarray, method: str) -> np.ndarray:
-    """Sample ``src`` (HWC) at floating PixelIsArea coordinates; returns float32 HWC."""
+    """Sample ``src`` in the native no-GIL kernel; return float32 HWC."""
     src_f = _ensure_hwc(src).astype(np.float32, copy=False)
-    map_x32 = np.ascontiguousarray(map_x.astype(np.float32, copy=False))
-    map_y32 = np.ascontiguousarray(map_y.astype(np.float32, copy=False))
     kind = normalize_resampling(method)
-    if cv2 is not None and _CV2_INTER is not None and kind in _CV2_INTER and np.isfinite(src_f).all():
-        map_x_cv = map_x32 - 0.5
-        map_y_cv = map_y32 - 0.5
-        interp = _CV2_INTER[kind]
-        if src_f.shape[2] == 1:
-            out = cv2.remap(
-                src_f[:, :, 0],
-                map_x_cv,
-                map_y_cv,
-                interpolation=interp,
-                borderMode=cv2.BORDER_CONSTANT,
-                borderValue=0,
-            )
-            return out[:, :, np.newaxis]
-        return cv2.remap(
-            src_f,
-            map_x_cv,
-            map_y_cv,
-            interpolation=interp,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=0,
-        )
-    return sample_image(src_f, map_y32, map_x32, kind)
+    if kind not in _NATIVE_KERNEL_CODES:
+        raise ValueError(f"resampling {kind!r} is not a kernel method")
+    from app.services.ctb.mesh_encode import remap_f32_hwc
+
+    return remap_f32_hwc(
+        np.ascontiguousarray(src_f),
+        np.ascontiguousarray(map_x, dtype=np.float64),
+        np.ascontiguousarray(map_y, dtype=np.float64),
+        _NATIVE_KERNEL_CODES[kind],
+    )
 
 
 def average_downsample(
@@ -448,31 +494,28 @@ def average_downsample(
     nodata: float | None = None,
 ) -> np.ndarray:
     """Block-average a 2D/HWC array to ``out_h``×``out_w``, masking NODATA."""
-    src = _ensure_hwc(array).astype(np.float32, copy=True)
+    src = _ensure_hwc(array).astype(np.float32, copy=False)
     if out_h <= 0 or out_w <= 0:
         raise ValueError("output size must be positive")
     if src.shape[0] == out_h and src.shape[1] == out_w:
-        return src
-    src_h, src_w, samples = src.shape
-    factor_y = max(1, src_h // out_h)
-    factor_x = max(1, src_w // out_w)
-    for band in range(samples):
-        src[:, :, band][nodata_mask(src[:, :, band], nodata)] = np.nan
-    padded = np.full((out_h * factor_y, out_w * factor_x, samples), np.nan, dtype=np.float32)
-    copy_h = min(src_h, padded.shape[0])
-    copy_w = min(src_w, padded.shape[1])
-    padded[:copy_h, :copy_w] = src[:copy_h, :copy_w]
-    blocks = padded.reshape(out_h, factor_y, out_w, factor_x, samples)
-    valid = np.isfinite(blocks)
-    counts = valid.sum(axis=(1, 3), dtype=np.float32)
-    sums = np.where(valid, blocks, 0.0).sum(axis=(1, 3), dtype=np.float32)
+        return np.ascontiguousarray(src)
+    samples = src.shape[2]
     fill = (
         np.float32("nan")
         if nodata is None or (isinstance(nodata, float) and np.isnan(nodata))
         else np.float32(nodata)
     )
-    out = np.full(counts.shape, fill, dtype=np.float32)
-    np.divide(sums, counts, out=out, where=counts > 0)
+    from app.services.ctb.mesh_encode import box_average_f32
+
+    out = np.empty((out_h, out_w, samples), dtype=np.float32)
+    for band in range(samples):
+        band_src = np.ascontiguousarray(src[:, :, band])
+        if nodata is not None:
+            invalid = nodata_mask(band_src, nodata)
+            if np.any(invalid):
+                band_src = band_src.copy()
+                band_src[invalid] = np.nan
+        out[:, :, band] = box_average_f32(band_src, out_h, out_w, float(fill))
     return out
 
 

@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import math
 
+CTB_SOURCE_REPOSITORY = "https://github.com/ch-dpf/cesium-terrain-builder"
+CTB_SOURCE_COMMIT = "676719d22622c6ef754e2a348a14459df4ff2db6"
+
 # CMake TERRAIN_TILE_SIZE / TERRAIN_MASK_SIZE (src/config.hpp.in).
 TERRAIN_TILE_SIZE = 65
 TERRAIN_MASK_SIZE = 256
@@ -11,6 +14,9 @@ TERRAIN_MASK_SIZE = 256
 # ctb-tile CLI defaults when -t is omitted (tools/ctb-tile.cpp).
 GEODETIC_DEFAULT_TILE_SIZE = 65
 MERCATOR_DEFAULT_TILE_SIZE = 256
+# CTB's 256 Mercator default is invalid for its BTT mesh, which requires 2^n+1.
+# Use the nearest valid size for quantized-mesh while Terrain keeps 256.
+MERCATOR_MESH_DEFAULT_TILE_SIZE = 257
 
 # MeshTiler.cpp / TerrainProvider.js
 HEIGHTMAP_TERRAIN_QUALITY = 0.25

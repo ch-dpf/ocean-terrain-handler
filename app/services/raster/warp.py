@@ -118,12 +118,23 @@ def _prepare_source_window(
     band: int,
     effective_nodata: float | None,
     *,
+    source_maps: tuple[np.ndarray, np.ndarray] | None = None,
     extra_rows: int = 0,
     extra_cols: int = 0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, float, int, int] | None:
-    src_cols, src_rows = _src_colrow_maps(
-        src, dst_affine, dst_crs, dst_row0, dst_col0, dst_h + extra_rows, dst_w + extra_cols, transformer
-    )
+    if source_maps is None:
+        src_cols, src_rows = _src_colrow_maps(
+            src,
+            dst_affine,
+            dst_crs,
+            dst_row0,
+            dst_col0,
+            dst_h + extra_rows,
+            dst_w + extra_cols,
+            transformer,
+        )
+    else:
+        src_cols, src_rows = source_maps
     finite = np.isfinite(src_cols) & np.isfinite(src_rows)
     if not np.any(finite):
         return None
@@ -144,12 +155,14 @@ def _prepare_source_window(
         finite = np.isfinite(src_cols) & np.isfinite(src_rows)
         finite_rows = src_rows[finite]
         finite_cols = src_cols[finite]
-    rmin = int(np.floor(finite_rows.min())) - pad
-    rmax = int(np.ceil(finite_rows.max())) + pad + 1
-    cmin = int(np.floor(finite_cols.min())) - pad
-    cmax = int(np.ceil(finite_cols.max())) + pad + 1
-    win_h = max(1, rmax - rmin)
-    win_w = max(1, cmax - cmin)
+    rmin = max(0, int(np.floor(finite_rows.min())) - pad)
+    rmax = min(level.height, int(np.ceil(finite_rows.max())) + pad + 1)
+    cmin = max(0, int(np.floor(finite_cols.min())) - pad)
+    cmax = min(level.width, int(np.ceil(finite_cols.max())) + pad + 1)
+    if rmin >= rmax or cmin >= cmax:
+        return None
+    win_h = rmax - rmin
+    win_w = cmax - cmin
     window = src.read_window(rmin, cmin, win_h, win_w, level=level)
     band_i = min(max(band, 0), window.shape[2] - 1)
     elevation = window[:, :, band_i].astype(np.float32, copy=True)
@@ -204,11 +217,13 @@ def warp_window(
             finite_rows = src_rows[finite]
             finite_cols = src_cols[finite]
         pad = _pad_for_method(resampling)
-        rmin = int(np.floor(finite_rows.min())) - pad
-        rmax = int(np.ceil(finite_rows.max())) + pad + 1
-        cmin = int(np.floor(finite_cols.min())) - pad
-        cmax = int(np.ceil(finite_cols.max())) + pad + 1
-        window = src.read_window(rmin, cmin, max(1, rmax - rmin), max(1, cmax - cmin), level=level)
+        rmin = max(0, int(np.floor(finite_rows.min())) - pad)
+        rmax = min(level.height, int(np.ceil(finite_rows.max())) + pad + 1)
+        cmin = max(0, int(np.floor(finite_cols.min())) - pad)
+        cmax = min(level.width, int(np.ceil(finite_cols.max())) + pad + 1)
+        if rmin >= rmax or cmin >= cmax:
+            return cast_sampled(empty, src.dtype, nodata=effective_nodata)
+        window = src.read_window(rmin, cmin, rmax - rmin, cmax - cmin, level=level)
         band_i = min(max(band, 0), window.shape[2] - 1)
         elevation = window[:, :, band_i].astype(np.float32, copy=True)
         elevation[nodata_mask(elevation, effective_nodata)] = np.nan
@@ -246,6 +261,7 @@ def warp_window(
         transformer,
         band,
         effective_nodata,
+        source_maps=(src_cols, src_rows),
     )
     if prepared is None:
         return cast_sampled(empty, src.dtype, nodata=effective_nodata)

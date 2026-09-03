@@ -3,10 +3,8 @@
 from celery import Celery
 
 from app.config import get_settings
-from app.services.ctb.mesh_encode import require_native
 
 settings = get_settings()
-require_native()
 
 celery_app = Celery(
     "ocean_terrain_handler",

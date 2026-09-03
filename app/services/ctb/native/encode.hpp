@@ -1,5 +1,8 @@
 #pragma once
 
+// Self-contained adaptation of CTB MeshTile.cpp / TerrainTile.cpp.
+// Source: ch-dpf/cesium-terrain-builder@676719d (Apache-2.0).
+
 #include "heightfield.hpp"
 
 #include <cmath>

@@ -1,9 +1,8 @@
 """CTB-compatible terrain tiling (quantized-mesh and heightmap).
 
-Algorithms, constants, and tile layout are ported from
-``ahuarte47/cesium-terrain-builder`` (``master-quantized-mesh``),
-Apache-2.0, GeoData / Alvaro Huarte.
+Algorithms, constants, and tile layout are adapted from
+``ch-dpf/cesium-terrain-builder@676719d`` (Apache-2.0).
 
-Python schedules tiles and reads rasters; meshing and encoding run in the
-Cython/C++ extension when it is built. No Docker ``ctb-tile`` sidecar.
+Python schedules tiles and reads raster windows; resampling, meshing, and
+encoding require the bundled Cython/C++ extension. No Docker sidecar.
 """

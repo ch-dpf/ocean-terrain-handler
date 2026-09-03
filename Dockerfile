@@ -1,22 +1,29 @@
-FROM python:3.12-slim-bookworm
+FROM python:3.12-slim-bookworm AS wheel-builder
 
-# g++/python headers: Cython CTB meshing+encode (C++17, no system zlib).
-# libgomp1/libglib: opencv-python-headless.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
-    python3-dev \
-    libgomp1 \
-    libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+COPY pyproject.toml setup.py MANIFEST.in README.md LICENSE.md THIRD_PARTY_NOTICES.md ./
+COPY app ./app
+COPY benchmarks ./benchmarks
+COPY scripts ./scripts
+
+# Build a wheel for the image's target CPU. Build dependencies remain in this stage.
+RUN python3 -m pip wheel --no-cache-dir --no-deps --wheel-dir /wheels .
+
+
+FROM python:3.12-slim-bookworm
 
 WORKDIR /app
 
-COPY requirements.txt pyproject.toml setup.py ./
-RUN pip3 install --no-cache-dir -r requirements.txt cython
-
-COPY app ./app
-RUN python3 setup.py build_ext --inplace \
-    && rm -rf build
+COPY requirements.txt .
+RUN pip3 install --no-cache-dir -r requirements.txt
+COPY --from=wheel-builder /wheels/*.whl /tmp/wheels/
+RUN pip3 install --no-cache-dir --no-deps /tmp/wheels/*.whl \
+    && rm -rf /tmp/wheels \
+    && python3 -m app.services.ctb.native_check
 
 ENV PYTHONUNBUFFERED=1
-ENV PYTHONPATH=/app

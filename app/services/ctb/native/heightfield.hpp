@@ -1,5 +1,8 @@
 #pragma once
 
+// Self-contained adaptation of CTB HeightFieldChunker.hpp / MeshTiler.cpp.
+// Source: ch-dpf/cesium-terrain-builder@676719d (Apache-2.0).
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -78,8 +81,9 @@ struct GenState {
 class HeightField {
 public:
     HeightField(const float* heights, int size) : size_(size), heights_(heights, heights + size * size) {
-        if (size < 2) {
-            throw std::runtime_error("heightfield must be at least 2x2");
+        const int edge = size - 1;
+        if (size < 3 || (edge & (edge - 1)) != 0) {
+            throw std::runtime_error("heightfield size must be 2^n + 1");
         }
         log_size_ = static_cast<int>(std::floor(std::log2(static_cast<double>(size) - 1.0) + 0.5));
         levels_.assign(static_cast<size_t>(size) * static_cast<size_t>(size), static_cast<std::uint8_t>(255));

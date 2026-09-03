@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 from pyproj import CRS
 
+from app.services.ctb.mesh_encode import native_available
 from app.services.raster.affine import Affine
 from app.services.raster.fillnodata import fill_nodata_array
 from app.services.raster.geotiff import GeoTiffReader, write_geotiff_array
@@ -13,6 +14,10 @@ from app.services.raster.info import raster_info_json
 from app.services.raster.nodata import nodata_mask
 from app.services.raster.resample import sample_bilinear
 from tests.raster_fixtures import write_dem_geotiff_4326
+
+pytestmark_native = pytest.mark.skipif(
+    not native_available(), reason="CTB native extension not built"
+)
 
 
 def test_geotiff_roundtrip_window_read(tmp_path: Path):
@@ -62,6 +67,7 @@ def test_sample_bilinear_identity():
     np.testing.assert_allclose(out[:, :, 0], [[10, 20], [30, 40]], atol=1e-5)
 
 
+@pytestmark_native
 def test_same_crs_warp_preserves_float_elevation(tmp_path: Path):
     from app.services.raster.warp import warp_window
 
@@ -73,6 +79,50 @@ def test_same_crs_warp_preserves_float_elevation(tmp_path: Path):
         out = warp_window(src, affine, CRS.from_epsg(4326), 0, 0, 16, 16, "bilinear")
     assert out.shape == (16, 16, 1)
     np.testing.assert_allclose(out[:, :, 0], src_arr, atol=1e-3)
+
+
+@pytestmark_native
+def test_warp_clips_source_window_to_raster_bounds(tmp_path: Path):
+    from app.services.raster.warp import warp_window
+
+    source = np.full((32, 32), 10.0, dtype=np.float32)
+    path = tmp_path / "small-extent.tif"
+    write_geotiff_array(
+        path,
+        source,
+        affine=Affine.north_up(116.0, 40.0, 0.001, 0.001),
+        crs=CRS.from_epsg(4326),
+        block_size=16,
+    )
+    # A world-scale destination maps far outside this tiny raster. The source
+    # allocation must stay clipped to 32x32 instead of following map extents.
+    destination = Affine.north_up(-180.0, 90.0, 180.0 / 64.0, 180.0 / 64.0)
+    with GeoTiffReader(path) as src:
+        out = warp_window(
+            src,
+            destination,
+            CRS.from_epsg(4326),
+            0,
+            0,
+            65,
+            65,
+            "average",
+        )
+    assert out.shape == (65, 65, 1)
+
+
+@pytestmark_native
+def test_warp_average_is_area_weighted(tmp_path: Path):
+    from app.services.raster.warp import warp_window
+
+    source = np.array([[0.0, 10.0], [20.0, 30.0]], dtype=np.float32)
+    path = tmp_path / "avg.tif"
+    affine = Affine.north_up(0.0, 2.0, 1.0, 1.0)
+    write_geotiff_array(path, source, affine=affine, crs=CRS.from_epsg(4326), block_size=16)
+    destination = Affine.north_up(0.0, 2.0, 2.0, 2.0)
+    with GeoTiffReader(path) as src:
+        out = warp_window(src, destination, CRS.from_epsg(4326), 0, 0, 1, 1, "average")
+    np.testing.assert_allclose(out[:, :, 0], [[15.0]], atol=1e-5)
 
 
 def test_fill_nodata_array_idw():
@@ -102,6 +152,7 @@ def test_ordered_parallel_map_preserves_order():
     assert sorted(seen) == list(range(10))
 
 
+@pytestmark_native
 def test_overviews_used_for_coarse_warp(tmp_path: Path):
     from app.services.raster.overviews import add_overviews
     from app.services.raster.warp import warp_window

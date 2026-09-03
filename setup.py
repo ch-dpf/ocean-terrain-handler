@@ -2,21 +2,28 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+import sys
 
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
 
-ROOT = Path(__file__).resolve().parent
-NATIVE = ROOT / "app" / "services" / "ctb" / "native"
+NATIVE = "app/services/ctb/native"
 
 ext = Extension(
     "app.services.ctb._ctb_core",
     sources=[
-        str(NATIVE / "_ctb_core.pyx"),
-        str(NATIVE / "mesh_tile.cpp"),
+        f"{NATIVE}/_ctb_core.pyx",
+        f"{NATIVE}/mesh_tile.cpp",
+        f"{NATIVE}/resample.cpp",
     ],
-    include_dirs=[str(NATIVE)],
+    include_dirs=[NATIVE],
+    depends=[
+        f"{NATIVE}/mesh_tile.hpp",
+        f"{NATIVE}/heightfield.hpp",
+        f"{NATIVE}/encode.hpp",
+        f"{NATIVE}/resample.hpp",
+    ],
+    define_macros=[("NOMINMAX", "1")],
     language="c++",
 )
 
@@ -29,6 +36,11 @@ class BuildExt(build_ext):
         compile_args = ["/O2", "/std:c++17", "/EHsc"] if msvc else ["-O3", "-std=c++17"]
         for extension in self.extensions:
             extension.extra_compile_args = list(compile_args)
+            extension.extra_link_args = (
+                ["-static-libstdc++", "-static-libgcc"]
+                if not msvc and sys.platform.startswith("linux")
+                else []
+            )
             extension.libraries = []
         super().build_extensions()
 

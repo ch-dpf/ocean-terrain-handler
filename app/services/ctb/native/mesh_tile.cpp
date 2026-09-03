@@ -1,5 +1,8 @@
 #include "mesh_tile.hpp"
 
+// CTB-compatible meshing/encoding facade.
+// Source behavior: ch-dpf/cesium-terrain-builder@676719d (Apache-2.0).
+
 #include "encode.hpp"
 #include "heightfield.hpp"
 
