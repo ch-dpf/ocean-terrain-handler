@@ -5,6 +5,7 @@ __pycache__/
 .eggs/
 dist/
 build/
+wheelhouse/
 .venv/
 venv/
 .env
