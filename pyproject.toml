@@ -4,7 +4,8 @@ version = "0.1.0"
 description = "Terrain TIF preprocessing and Cesium terrain tile slicing service"
 readme = "README.md"
 requires-python = ">=3.11,<3.15"
-license = {file = "LICENSE.md"}
+license = "Apache-2.0"
+license-files = ["LICENSE.md", "THIRD_PARTY_NOTICES.md"]
 dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
@@ -35,7 +36,7 @@ dev = [
 ]
 
 [build-system]
-requires = ["setuptools>=75.0", "cython>=3.0", "numpy>=1.26"]
+requires = ["setuptools>=77.0", "cython>=3.0", "numpy>=1.26"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
@@ -44,7 +45,6 @@ include = ["app*", "benchmarks*"]
 
 [tool.setuptools]
 include-package-data = true
-license-files = ["LICENSE.md", "THIRD_PARTY_NOTICES.md"]
 
 [tool.setuptools.package-data]
 "app.services.ctb.native" = ["*.pyx", "*.cpp", "*.hpp"]

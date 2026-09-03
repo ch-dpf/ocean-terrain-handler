@@ -223,9 +223,9 @@ ocean-terrain-benchmark \
 验收值应根据目标 CPU、存储和真实 DEM 制定。基准输出总耗时、瓦片数、
 tiles/s 和 terrain 字节数；低于指定门槛会返回非零状态。
 
-本分支在当前 Linux x86_64 构建机上的回归样本：4096×4096、约 60 MB tiled
-GeoTIFF、zoom 13→7、`average`、3100 张瓦片；4 线程为 11.51 秒
-（269.4 tiles/s），1 线程为 41.88 秒（74.0 tiles/s）。该数据只证明热路径
+本分支在当前 Linux x86_64 构建机上的回归样本：4096×4096 tiled
+GeoTIFF、zoom 13→7、`average`、2982 张瓦片；4 线程约 6.3 秒
+（471 tiles/s），1 线程约 9.3 秒（320 tiles/s）。该数据只证明热路径
 释放 GIL 并可并行，不能替代目标机器和真实 DEM 的验收值。
 
 ## 7. 验证服务
